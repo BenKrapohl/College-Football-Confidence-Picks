@@ -1,0 +1,538 @@
+2026-03-16 07:37:30,744  INFO      discord.client  logging in using static token
+2026-03-16 07:37:32,130  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 07:37:32,237  ERROR     cfcp_bot  Failed to load cog cogs.setup: Extension 'cogs.setup' has no 'setup' function.
+Traceback (most recent call last):
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 957, in _load_from_module_spec
+    setup = getattr(lib, 'setup')
+            ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'cogs.setup' has no attribute 'setup'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "d:\Code\2026 College Football Confidence Picks\bot.py", line 56, in setup_hook
+    await self.load_extension(cog)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 1029, in load_extension
+    await self._load_from_module_spec(spec, name)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 960, in _load_from_module_spec
+    raise errors.NoEntryPointError(key)
+discord.ext.commands.errors.NoEntryPointError: Extension 'cogs.setup' has no 'setup' function.
+2026-03-16 07:37:32,392  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 07:37:32,811  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: e416d71fba14e9d8975daa725ed3e78c).
+2026-03-16 07:37:34,805  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 07:37:35,146  INFO      cogs.setup  Created channel #cfcp-admin
+2026-03-16 07:37:35,323  INFO      cogs.setup  Created channel #cfcp-logs
+2026-03-16 07:37:35,482  INFO      cogs.setup  Created channel #cfcp-picks
+2026-03-16 07:37:35,706  INFO      cogs.setup  Created channel #cfcp-games
+2026-03-16 07:37:35,945  INFO      cogs.setup  Created channel #cfcp-standings
+2026-03-16 07:37:39,087  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 07:37:39,304  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 07:41:59,316  INFO      discord.client  logging in using static token
+2026-03-16 07:41:59,946  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 07:42:00,063  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 07:42:00,477  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 97b4654e3ad80ec30642a36cbe39eadc).
+2026-03-16 07:42:02,489  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 07:42:04,386  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 07:42:04,631  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:22:05,527  INFO      discord.client  logging in using static token
+2026-03-16 17:22:06,417  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:22:06,417  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:22:06,446  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:22:06,584  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:22:07,045  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 95819841bd6ceb5a1b723687ec1164c5).
+2026-03-16 17:22:09,043  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:22:11,216  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:22:11,609  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:26:03,893  ERROR     discord.ui.modal  Ignoring exception in modal <LoadWeekModal timeout=None children=3>:
+Traceback (most recent call last):
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ui\modal.py", line 189, in _scheduled_task
+    await self.on_submit(interaction)
+  File "d:\Code\2026 College Football Confidence Picks\cogs\admin.py", line 287, in on_submit
+    await _refresh_all_panels(self.bot)
+  File "d:\Code\2026 College Football Confidence Picks\cogs\admin.py", line 146, in _refresh_all_panels
+    await refresh_picks_hub(
+  File "d:\Code\2026 College Football Confidence Picks\cogs\setup.py", line 192, in refresh_picks_hub
+    embed=picks_hub_embed(week, games, players),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "d:\Code\2026 College Football Confidence Picks\utils\embeds.py", line 67, in picks_hub_embed
+    value=format_time_et(datetime.fromisoformat(first_kick)),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "d:\Code\2026 College Football Confidence Picks\utils\time_utils.py", line 29, in format_time_et
+    return dt.strftime("%a %b %-d · %-I:%M %p ET")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Invalid format string
+2026-03-16 17:26:20,349  ERROR     discord.ui.view  Ignoring exception in view <LockConfirmView timeout=30 children=2> for item <Button style=<ButtonStyle.danger: 4> url=None disabled=False label='Confirm lock' emoji=None row=None sku_id=None>
+Traceback (most recent call last):
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ui\view.py", line 430, in _scheduled_task
+    await item.callback(interaction)
+  File "d:\Code\2026 College Football Confidence Picks\cogs\admin.py", line 533, in confirm
+    await _refresh_all_panels(self.bot)
+  File "d:\Code\2026 College Football Confidence Picks\cogs\admin.py", line 146, in _refresh_all_panels
+    await refresh_picks_hub(
+  File "d:\Code\2026 College Football Confidence Picks\cogs\setup.py", line 192, in refresh_picks_hub
+    embed=picks_hub_embed(week, games, players),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "d:\Code\2026 College Football Confidence Picks\utils\embeds.py", line 67, in picks_hub_embed
+    value=format_time_et(datetime.fromisoformat(first_kick)),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "d:\Code\2026 College Football Confidence Picks\utils\time_utils.py", line 29, in format_time_et
+    return dt.strftime("%a %b %-d · %-I:%M %p ET")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Invalid format string
+2026-03-16 17:36:50,655  INFO      discord.client  logging in using static token
+2026-03-16 17:36:51,916  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 17:36:52,047  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:36:52,047  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:36:52,083  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:36:52,083  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:36:52,113  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:36:52,339  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:36:52,692  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 72c69e2a8bdfa7dd0775e20f077d7da4).
+2026-03-16 17:36:54,685  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:36:57,517  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:36:57,703  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:45:29,257  INFO      discord.client  logging in using static token
+2026-03-16 17:45:30,568  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 17:45:30,726  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:45:30,726  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:45:30,790  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:45:30,790  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:45:30,796  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:45:30,943  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:45:31,314  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 4bbc35be13900e5de816cfcb9ec47ccf).
+2026-03-16 17:45:33,323  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:45:36,531  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:45:36,928  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:52:19,070  INFO      discord.client  logging in using static token
+2026-03-16 17:52:19,617  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:52:19,617  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:52:19,638  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:52:19,638  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:52:19,650  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:52:19,781  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:52:20,193  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 16923f3b2b9e9ef321fd22eab1104a99).
+2026-03-16 17:52:22,234  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:52:24,770  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:52:24,927  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:55:42,489  INFO      discord.client  logging in using static token
+2026-03-16 17:55:43,120  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:55:43,120  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:55:43,124  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:55:43,125  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:55:43,127  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:55:43,248  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:55:43,718  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 4c87ecc458a3bf073b9b2d3e544e75f1).
+2026-03-16 17:55:45,716  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:55:47,868  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:55:48,023  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:59:05,984  INFO      discord.client  logging in using static token
+2026-03-16 17:59:06,591  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:59:06,591  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:59:06,615  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:59:06,615  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:59:06,617  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 17:59:06,804  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 17:59:07,315  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 864270fc9c41d28c76cc17eb49e373cf).
+2026-03-16 17:59:09,323  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 17:59:11,254  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 17:59:11,516  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 17:59:34,059  INFO      discord.client  logging in using static token
+2026-03-16 17:59:34,825  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 17:59:34,828  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 17:59:34,832  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 17:59:34,832  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 17:59:34,833  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:00:06,792  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:00:07,199  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 9bc27cc581ac10dfe55b96a3943e8ef8).
+2026-03-16 18:00:09,203  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:00:11,989  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:00:12,400  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:05:09,847  INFO      discord.client  logging in using static token
+2026-03-16 18:05:10,678  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:05:10,682  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:05:10,695  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:05:10,697  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:05:10,740  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:05:10,742  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:05:10,745  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:05:10,922  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:05:11,352  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 1b1a1bad612bc746a0acd7c6d20ad3fc).
+2026-03-16 18:05:13,365  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:05:15,340  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:05:15,540  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:11:13,758  INFO      discord.client  logging in using static token
+2026-03-16 18:11:14,469  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:11:14,470  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:11:14,479  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:11:14,483  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:11:14,491  ERROR     cfcp_bot  Failed to load cog cogs.scoring: Extension 'cogs.scoring' raised an error: SyntaxError: 'await' outside async function (scoring.py, line 195)
+Traceback (most recent call last):
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 951, in _load_from_module_spec
+    spec.loader.exec_module(lib)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1074, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1004, in source_to_code
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "d:\Code\2026 College Football Confidence Picks\cogs\scoring.py", line 195
+    await refresh_standings(
+    ^
+SyntaxError: 'await' outside async function
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "d:\Code\2026 College Football Confidence Picks\bot.py", line 56, in setup_hook
+    await self.load_extension(cog)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 1029, in load_extension
+    await self._load_from_module_spec(spec, name)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 954, in _load_from_module_spec
+    raise errors.ExtensionFailed(key, e) from e
+discord.ext.commands.errors.ExtensionFailed: Extension 'cogs.scoring' raised an error: SyntaxError: 'await' outside async function (scoring.py, line 195)
+2026-03-16 18:11:14,495  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:11:14,618  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:11:14,999  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: d5416f58ee0569f785bfc5582696d560).
+2026-03-16 18:11:17,022  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:11:19,007  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:11:19,177  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:11:37,423  INFO      discord.client  logging in using static token
+2026-03-16 18:11:38,005  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:11:38,006  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:11:38,010  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:11:38,010  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:11:38,030  ERROR     cfcp_bot  Failed to load cog cogs.scoring: Extension 'cogs.scoring' raised an error: SyntaxError: 'await' outside async function (scoring.py, line 195)
+Traceback (most recent call last):
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 951, in _load_from_module_spec
+    spec.loader.exec_module(lib)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1074, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1004, in source_to_code
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "d:\Code\2026 College Football Confidence Picks\cogs\scoring.py", line 195
+    await refresh_standings(
+    ^
+SyntaxError: 'await' outside async function
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "d:\Code\2026 College Football Confidence Picks\bot.py", line 56, in setup_hook
+    await self.load_extension(cog)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 1029, in load_extension
+    await self._load_from_module_spec(spec, name)
+  File "C:\Users\benon\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\ext\commands\bot.py", line 954, in _load_from_module_spec
+    raise errors.ExtensionFailed(key, e) from e
+discord.ext.commands.errors.ExtensionFailed: Extension 'cogs.scoring' raised an error: SyntaxError: 'await' outside async function (scoring.py, line 195)
+2026-03-16 18:11:38,036  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:12:14,788  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:12:15,240  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: b2a42443cb689aafd51c29a82dbcac10).
+2026-03-16 18:12:17,261  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:12:19,459  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:12:19,660  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:13:05,398  INFO      discord.client  logging in using static token
+2026-03-16 18:13:06,003  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:13:06,004  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:13:06,013  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:13:06,013  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:13:06,036  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:13:06,037  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:13:06,040  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:13:06,163  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:13:06,732  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: f65f9940102cbe703423707ceeebba1a).
+2026-03-16 18:13:08,744  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:13:10,670  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:13:10,872  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:14:50,909  INFO      discord.client  logging in using static token
+2026-03-16 18:14:51,766  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:14:51,768  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:14:51,777  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:14:51,777  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:14:51,781  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:14:51,782  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:14:51,785  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:14:51,921  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:14:52,374  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 84bb371a1776d186e9a0756e5a03a678).
+2026-03-16 18:14:54,386  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:14:56,494  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:14:56,735  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:16:55,159  INFO      discord.client  logging in using static token
+2026-03-16 18:16:56,000  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:16:56,001  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:16:56,011  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:16:56,011  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:16:56,018  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:16:56,021  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:16:56,036  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-16 18:16:56,036  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-16 18:16:56,040  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:16:56,205  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:16:56,578  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: d7476527c4ba02242c9bdbec12d7e6a5).
+2026-03-16 18:16:58,585  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:17:00,993  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:17:01,235  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:19:28,966  INFO      discord.client  logging in using static token
+2026-03-16 18:19:30,204  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 18:19:30,315  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:19:30,315  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:19:30,320  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:19:30,320  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:19:30,322  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:19:30,322  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:19:30,325  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-16 18:19:30,326  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-16 18:19:30,327  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:19:30,489  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:19:30,895  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 1040e043c41291c079b0c6c0cca1433f).
+2026-03-16 18:19:32,922  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:19:35,199  INFO      cogs.setup  Reconnected to existing panel in #cfcp-admin (msg 1483219702699393205)
+2026-03-16 18:19:36,037  INFO      cogs.setup  Reconnected to existing panel in #cfcp-picks (msg 1483219705199067306)
+2026-03-16 18:19:36,558  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:19:37,001  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:19:37,001  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:19:37,273  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:20:52,847  INFO      discord.client  logging in using static token
+2026-03-16 18:20:54,523  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 18:20:54,662  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:20:54,664  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:20:54,674  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:20:54,675  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:20:54,677  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:20:54,677  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:20:54,681  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-16 18:20:54,681  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-16 18:20:54,688  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:20:54,841  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:20:55,214  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 7dae113392dc3398740a4fc6f6d25de6).
+2026-03-16 18:20:57,225  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:20:58,323  INFO      cogs.setup  Reconnected to existing panel in #cfcp-admin (msg 1483219702699393205)
+2026-03-16 18:20:58,808  INFO      cogs.setup  Reconnected to existing panel in #cfcp-picks (msg 1483219705199067306)
+2026-03-16 18:20:59,632  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:21:00,064  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:21:00,065  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:21:00,700  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:26:49,667  INFO      discord.client  logging in using static token
+2026-03-16 18:26:51,033  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 18:26:51,142  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:26:51,142  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:26:51,164  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:26:51,164  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:26:51,167  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:26:51,167  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:26:51,172  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-16 18:26:51,173  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-16 18:26:51,194  INFO      cogs.stats  StatsCog loaded.
+2026-03-16 18:26:51,194  INFO      cfcp_bot  Loaded cog: cogs.stats
+2026-03-16 18:26:51,198  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:26:51,360  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:26:52,709  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: d10067b2a17a9678a818528b01b24ccf).
+2026-03-16 18:26:54,742  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:26:55,996  INFO      cogs.setup  Reconnected to existing panel in #cfcp-admin (msg 1483219702699393205)
+2026-03-16 18:26:56,599  INFO      cogs.setup  Reconnected to existing panel in #cfcp-picks (msg 1483219705199067306)
+2026-03-16 18:26:57,190  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:26:57,846  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:26:57,847  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:26:58,134  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-16 18:34:45,445  INFO      discord.client  logging in using static token
+2026-03-16 18:34:47,477  INFO      cfcp_bot  Created 2026 season record.
+2026-03-16 18:34:47,603  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-16 18:34:47,603  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-16 18:34:47,607  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-16 18:34:47,608  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-16 18:34:47,611  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-16 18:34:47,611  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-16 18:34:47,615  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-16 18:34:47,615  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-16 18:34:47,618  INFO      cogs.stats  StatsCog loaded.
+2026-03-16 18:34:47,618  INFO      cfcp_bot  Loaded cog: cogs.stats
+2026-03-16 18:34:47,622  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-16 18:34:47,758  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-16 18:34:48,143  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: 4bd8119ddd99730c560b114c1c793c49).
+2026-03-16 18:34:50,158  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-16 18:34:51,226  INFO      cogs.setup  Reconnected to existing panel in #cfcp-admin (msg 1483219702699393205)
+2026-03-16 18:34:51,724  INFO      cogs.setup  Reconnected to existing panel in #cfcp-picks (msg 1483219705199067306)
+2026-03-16 18:34:52,307  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:34:52,807  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-16 18:34:52,808  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-16 18:34:52,973  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-21 07:17:56,085  INFO      discord.client  logging in using static token
+2026-03-21 07:17:56,963  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-21 07:17:56,963  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-21 07:17:56,973  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-21 07:17:56,973  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-21 07:17:56,983  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-21 07:17:56,983  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-21 07:17:56,991  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-21 07:17:56,991  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-21 07:17:56,992  INFO      cogs.stats  StatsCog loaded.
+2026-03-21 07:17:56,992  INFO      cfcp_bot  Loaded cog: cogs.stats
+2026-03-21 07:17:57,000  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-21 07:17:57,150  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-21 07:17:57,578  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: f8a8796f3a627531e39e2c23a37d510f).
+2026-03-21 07:17:59,589  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-21 07:18:01,967  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-21 07:18:02,290  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-22 10:00:36,191  INFO      discord.client  logging in using static token
+2026-03-22 10:00:37,735  INFO      cfcp_bot  Created 2026 season record.
+2026-03-22 10:00:38,936  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-22 10:00:38,936  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-22 10:00:38,951  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-22 10:00:38,952  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-22 10:00:38,953  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-22 10:00:38,953  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-22 10:00:38,962  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-22 10:00:38,963  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-22 10:00:38,964  INFO      cogs.stats  StatsCog loaded.
+2026-03-22 10:00:38,964  INFO      cfcp_bot  Loaded cog: cogs.stats
+2026-03-22 10:00:38,972  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-22 10:00:39,113  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-22 10:00:39,524  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: b59462e1cdb56f99294db2d149ac6ca4).
+2026-03-22 10:00:41,530  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-22 10:00:43,217  INFO      cogs.setup  Reconnected to existing panel in #cfcp-admin (msg 1483219702699393205)
+2026-03-22 10:00:43,697  INFO      cogs.setup  Reconnected to existing panel in #cfcp-picks (msg 1483219705199067306)
+2026-03-22 10:00:44,166  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-22 10:00:44,590  INFO      cogs.setup  Reconnected to existing panel in #cfcp-standings (msg 1483219710526095482)
+2026-03-22 10:00:44,590  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-22 10:00:44,791  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-22 12:08:40,726  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 14:52:43,734  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 15:18:44,132  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 16:15:16,669  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 16:49:07,015  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 18:08:07,400  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 19:16:42,529  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 20:40:36,977  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-22 23:57:41,104  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 03:14:43,426  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 05:09:11,549  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 07:22:35,506  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 10:59:19,561  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 13:55:39,492  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 15:59:58,410  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 16:31:56,226  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 18:03:06,323  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 20:01:21,669  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 21:01:59,292  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-23 22:04:29,036  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 00:47:28,542  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 02:16:20,890  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 02:59:09,191  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 06:38:58,780  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 08:34:46,064  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 11:03:09,037  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 13:46:08,731  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 14:47:08,171  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 15:43:54,213  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 17:52:16,099  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 19:28:50,178  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-24 22:49:18,568  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 00:32:37,142  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 01:36:37,361  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 02:26:07,765  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 04:40:55,292  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 05:19:07,127  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 06:36:32,049  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 06:54:31,276  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 10:10:31,344  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 13:22:38,986  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 14:32:14,618  INFO      discord.gateway  Shard ID None has successfully RESUMED session b59462e1cdb56f99294db2d149ac6ca4.
+2026-03-25 15:13:44,992  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:13:54,940  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:13:59,660  ERROR     discord.client  Attempting a reconnect in 1.20s
+Traceback (most recent call last):
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\client.py", line 728, in connect
+    self.ws = await asyncio.wait_for(coro, timeout=60.0)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\asyncio\tasks.py", line 479, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\gateway.py", line 392, in from_client
+    socket = await client.http.ws_connect(str(url))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\http.py", line 571, in ws_connect
+    return await self.__session.ws_connect(url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 795, in _ws_connect
+    raise WSServerHandshakeError(
+aiohttp.client_exceptions.WSServerHandshakeError: 520, message='Invalid response status', url=URL('wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream')
+2026-03-25 15:14:01,153  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:14:10,755  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:14:11,009  ERROR     discord.client  Attempting a reconnect in 0.80s
+Traceback (most recent call last):
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\client.py", line 728, in connect
+    self.ws = await asyncio.wait_for(coro, timeout=60.0)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\asyncio\tasks.py", line 479, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\gateway.py", line 392, in from_client
+    socket = await client.http.ws_connect(str(url))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\http.py", line 571, in ws_connect
+    return await self.__session.ws_connect(url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 795, in _ws_connect
+    raise WSServerHandshakeError(
+aiohttp.client_exceptions.WSServerHandshakeError: 520, message='Invalid response status', url=URL('wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream')
+2026-03-25 15:14:12,064  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:14:12,298  ERROR     discord.client  Attempting a reconnect in 4.25s
+Traceback (most recent call last):
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\client.py", line 728, in connect
+    self.ws = await asyncio.wait_for(coro, timeout=60.0)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\asyncio\tasks.py", line 479, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\gateway.py", line 392, in from_client
+    socket = await client.http.ws_connect(str(url))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\http.py", line 571, in ws_connect
+    return await self.__session.ws_connect(url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 795, in _ws_connect
+    raise WSServerHandshakeError(
+aiohttp.client_exceptions.WSServerHandshakeError: 520, message='Invalid response status', url=URL('wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream')
+2026-03-25 15:14:16,791  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-25 15:14:17,020  ERROR     discord.client  Attempting a reconnect in 8.91s
+Traceback (most recent call last):
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\client.py", line 728, in connect
+    self.ws = await asyncio.wait_for(coro, timeout=60.0)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\asyncio\tasks.py", line 479, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\gateway.py", line 392, in from_client
+    socket = await client.http.ws_connect(str(url))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\discord\http.py", line 571, in ws_connect
+    return await self.__session.ws_connect(url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Server\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiohttp\client.py", line 795, in _ws_connect
+    raise WSServerHandshakeError(
+aiohttp.client_exceptions.WSServerHandshakeError: 520, message='Invalid response status', url=URL('wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream')
+2026-03-25 15:14:26,187  INFO      discord.gateway  Shard ID None session has been invalidated.
+2026-03-30 21:49:19,671  INFO      discord.client  logging in using static token
+2026-03-30 21:49:20,669  INFO      cogs.admin  AdminCog loaded and AdminPanelView registered.
+2026-03-30 21:49:20,669  INFO      cfcp_bot  Loaded cog: cogs.admin
+2026-03-30 21:49:20,677  INFO      cogs.picks  PicksCog loaded and PicksHubView registered.
+2026-03-30 21:49:20,677  INFO      cfcp_bot  Loaded cog: cogs.picks
+2026-03-30 21:49:20,687  INFO      cogs.scoring  ScoringCog loaded.
+2026-03-30 21:49:20,688  INFO      cfcp_bot  Loaded cog: cogs.scoring
+2026-03-30 21:49:20,695  INFO      cogs.notifications  NotificationsCog loaded.
+2026-03-30 21:49:20,695  INFO      cfcp_bot  Loaded cog: cogs.notifications
+2026-03-30 21:49:20,696  INFO      cogs.stats  StatsCog loaded.
+2026-03-30 21:49:20,697  INFO      cfcp_bot  Loaded cog: cogs.stats
+2026-03-30 21:49:20,704  INFO      cfcp_bot  Loaded cog: cogs.setup
+2026-03-30 21:49:20,850  INFO      cfcp_bot  Slash commands synced to guild 1400134037900754994
+2026-03-30 21:49:21,414  INFO      discord.gateway  Shard ID None has connected to Gateway (Session ID: cbb15e69e1d2888d06723744444947bb).
+2026-03-30 21:49:23,441  INFO      cfcp_bot  Logged in as College Football Bot#9758 (998998846677995623)
+2026-03-30 21:49:25,606  INFO      cogs.setup  All CFCP channels and panel messages are ready.
+2026-03-30 21:49:25,908  INFO      cfcp_bot  CFCP Bot is ready.
+2026-03-30 23:47:04,371  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 02:30:48,788  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 05:56:34,135  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 09:55:04,570  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 12:13:30,950  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 12:44:05,547  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 16:31:49,485  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.
+2026-03-31 17:44:14,445  INFO      discord.gateway  Shard ID None has successfully RESUMED session cbb15e69e1d2888d06723744444947bb.

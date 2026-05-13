@@ -1,0 +1,196 @@
+import requests
+from datetime import datetime
+from typing import Optional
+from zoneinfo import ZoneInfo
+from config import ESPN_SCOREBOARD_URL, ESPN_RANKINGS_URL, POLL_AP, POLL_CFP
+
+ET = ZoneInfo("America/New_York")
+
+
+def _get(url: str, params: Optional[dict] = None) -> dict:
+    resp = requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── RANKINGS ──────────────────────────────────────────────────────────────────
+
+def fetch_rankings(poll_type: str = POLL_AP) -> dict[str, int]:
+    """
+    Returns {team_location: rank} for the requested poll.
+    poll_type: 'ap' or 'cfp'
+    """
+    data = _get(ESPN_RANKINGS_URL)
+    target_name = "AP Top 25" if poll_type == POLL_AP else "College Football Playoff"
+
+    for poll in data.get("rankings", []):
+        if target_name.lower() in poll.get("name", "").lower():
+            ranks = {}
+            for entry in poll.get("ranks", []):
+                team_loc = entry["team"]["location"]
+                ranks[team_loc] = entry["current"]
+            return ranks
+
+    return {}
+
+
+# ── SCHEDULE ──────────────────────────────────────────────────────────────────
+
+def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int]) -> list[dict]:
+    """
+    Fetch all games in date range, filter to those involving at least one
+    ranked team, and return structured game dicts.
+
+    start_date / end_date: 'YYYYMMDD'
+    ranked_teams: {team_location: rank}
+    """
+    params = {"dates": f"{start_date}-{end_date}"}
+    data = _get(ESPN_SCOREBOARD_URL, params=params)
+
+    games = []
+    seen_espn_ids = set()
+
+    for event in data.get("events", []):
+        espn_id = event["id"]
+        if espn_id in seen_espn_ids:
+            continue
+
+        comp = event["competitions"][0]
+        competitors = comp["competitors"]
+
+        home = next((c for c in competitors if c["homeAway"] == "home"), competitors[0])
+        away = next((c for c in competitors if c["homeAway"] == "away"), competitors[1])
+
+        home_name = home["team"]["location"]
+        away_name = away["team"]["location"]
+
+        home_rank = ranked_teams.get(home_name)
+        away_rank = ranked_teams.get(away_name)
+
+        if home_rank is None and away_rank is None:
+            continue
+
+        # Parse kickoff time — ESPN returns UTC ISO8601
+        raw_time = event.get("date", "")
+        try:
+            kickoff_utc = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            kickoff_et  = kickoff_utc.astimezone(ET)
+            kickoff_iso = kickoff_et.isoformat()
+        except (ValueError, AttributeError):
+            kickoff_iso = raw_time
+
+        # Broadcast
+        try:
+            broadcast = comp["broadcasts"][0]["names"][0]
+        except (KeyError, IndexError):
+            broadcast = "TBD"
+
+        # Odds
+        odds = comp.get("odds", [])
+        spread = ""
+        over_under = ""
+        if odds:
+            for o in odds:
+                if "details" in o and not spread:
+                    spread = o["details"]
+                if "overUnder" in o and not over_under:
+                    over_under = str(o["overUnder"])
+
+        # Status
+        status_name = event["status"]["type"]["name"]
+        status_map  = {"STATUS_SCHEDULED": "scheduled",
+                       "STATUS_IN_PROGRESS": "in_progress",
+                       "STATUS_FINAL": "final"}
+        status = status_map.get(status_name, "scheduled")
+
+        # Scores / winner
+        try:
+            home_score = int(home.get("score", 0))
+            away_score = int(away.get("score", 0))
+        except (TypeError, ValueError):
+            home_score = away_score = None
+
+        winner = None
+        if status == "final" and home_score is not None and away_score is not None:
+            winner = home_name if home_score > away_score else away_name
+
+        games.append({
+            "espn_game_id": espn_id,
+            "home_team":    home_name,
+            "away_team":    away_name,
+            "home_rank":    home_rank,
+            "away_rank":    away_rank,
+            "spread":       spread,
+            "over_under":   over_under,
+            "kickoff_time": kickoff_iso,
+            "channel":      broadcast,
+            "espn_link":    f"https://www.espn.com/college-football/game?gameId={espn_id}",
+            "status":       status,
+            "home_score":   home_score,
+            "away_score":   away_score,
+            "winner":       winner,
+        })
+
+        seen_espn_ids.add(espn_id)
+
+    games.sort(key=lambda g: g["kickoff_time"])
+    return games
+
+
+# ── LIVE SCORE UPDATE ─────────────────────────────────────────────────────────
+
+def fetch_game_status(espn_game_id: str) -> dict | None:
+    """
+    Fetch current status for a single game by ESPN ID.
+    Returns dict with keys: status, home_score, away_score, winner,
+    status_detail (e.g. 'Q3 7:42'), or None on failure.
+    """
+    try:
+        url = (
+            f"http://site.api.espn.com/apis/site/v2/sports/football/"
+            f"college-football/summary?event={espn_game_id}"
+        )
+        data = _get(url)
+        header = data.get("header", {})
+        competitions = header.get("competitions", [{}])
+        comp = competitions[0] if competitions else {}
+
+        status_obj   = comp.get("status", {})
+        status_type  = status_obj.get("type", {})
+        status_name  = status_type.get("name", "STATUS_SCHEDULED")
+        status_detail = status_type.get("shortDetail", "")
+
+        status_map = {
+            "STATUS_SCHEDULED":   "scheduled",
+            "STATUS_IN_PROGRESS": "in_progress",
+            "STATUS_FINAL":       "final",
+        }
+        status = status_map.get(status_name, "scheduled")
+
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+        away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+        try:
+            home_score = int(home.get("score", 0))
+            away_score = int(away.get("score", 0))
+        except (TypeError, ValueError):
+            home_score = away_score = 0
+
+        home_name = home.get("team", {}).get("location", "")
+        away_name = away.get("team", {}).get("location", "")
+
+        winner = None
+        if status == "final":
+            winner = home_name if home_score > away_score else away_name
+
+        return {
+            "status":        status,
+            "home_score":    home_score,
+            "away_score":    away_score,
+            "winner":        winner,
+            "status_detail": status_detail,
+        }
+
+    except Exception:
+        return None

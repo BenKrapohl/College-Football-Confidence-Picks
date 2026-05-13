@@ -1,0 +1,6 @@
+discord.py==2.4.0
+python-dotenv==1.0.1
+requests==2.32.3
+apscheduler==3.10.4
+openpyxl==3.1.5
+zoneinfo; python_version < "3.9"
