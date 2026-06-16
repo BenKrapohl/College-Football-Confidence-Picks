@@ -7,13 +7,13 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import ADMIN_ROLE_ID, GUILD_ID, COLOR_PURPLE, COLOR_GREEN, COLOR_GRAY
-from database import (get_db, config_get, get_active_season,
-                      get_all_active_players, get_player_by_discord_id,
-                      get_player_picks_for_week, get_used_slots_for_week,
-                      get_unpicked_games_for_player)
-from utils.embeds import log_embed
-from utils.time_utils import format_time_et, seconds_until
+from config import COLOR_PURPLE, COLOR_GREEN
+from database import (get_db, config_get, get_all_active_players,
+                      get_player_by_discord_id, get_used_slots_for_week)
+# FIX #25: import shared helpers instead of duplicating them
+from utils.helpers import is_admin, log_to_channel, resolve_current_week
+# FIX #1 / #3: use seconds_until_iso for string kickoff times
+from utils.time_utils import format_time_et, seconds_until_iso
 
 log = logging.getLogger(__name__)
 ET  = ZoneInfo("America/New_York")
@@ -21,46 +21,25 @@ ET  = ZoneInfo("America/New_York")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _current_week():
-    season = get_active_season()
-    if not season:
-        return None, None
-    with get_db() as conn:
-        week = conn.execute(
-            "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
-            (season["id"],)
-        ).fetchone()
-    return season, week
-
-
 def _get_player(discord_id: str):
     return get_player_by_discord_id(str(discord_id))
 
 
 def _game_is_locked(game: dict) -> bool:
-    """A game is locked if its kickoff has passed OR the week is locked."""
+    """A game is locked if its kickoff has passed OR it is in progress / final."""
     if game.get("status") in ("in_progress", "final"):
         return True
     try:
-        secs = seconds_until(game["kickoff_time"])
+        # FIX #1 / #3: seconds_until_iso accepts a raw ISO string
+        secs = seconds_until_iso(game["kickoff_time"])
         return secs <= 0
     except Exception:
         return False
 
 
-async def _log(bot: commands.Bot, description: str,
-               title: str = "Picks", level: str = "info") -> None:
-    ch_id = config_get("channel_logs")
-    if not ch_id:
-        return
-    ch = bot.get_channel(int(ch_id))
-    if isinstance(ch, discord.TextChannel):
-        await ch.send(embed=log_embed(title, description, level))
-
-
 async def _refresh_picks_hub(bot: commands.Bot) -> None:
     from cogs.setup import refresh_picks_hub
-    season, week = _current_week()
+    season, week = resolve_current_week()
     if not week:
         await refresh_picks_hub(bot)
         return
@@ -69,7 +48,7 @@ async def _refresh_picks_hub(bot: commands.Bot) -> None:
             "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
             (week["id"],)
         ).fetchall()
-    players = get_all_active_players()
+    players     = get_all_active_players()
     player_list = []
     with get_db() as conn:
         for p in players:
@@ -81,6 +60,8 @@ async def _refresh_picks_hub(bot: commands.Bot) -> None:
             ).fetchone()["c"]
             player_list.append({
                 **dict(p),
+                # FIX #22: submitted = picked at least as many games as were
+                # available when they last submitted, capped at game_count
                 "submitted": count >= week["game_count"]
             })
     await refresh_picks_hub(
@@ -101,11 +82,10 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
     )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        discord_id  = str(interaction.user.id)
-        username    = str(interaction.user)
-        name        = self.display_name.value.strip()
+        discord_id = str(interaction.user.id)
+        username   = str(interaction.user)
+        name       = self.display_name.value.strip()
 
-        # Already a player?
         existing = _get_player(discord_id)
         if existing:
             status = existing["status"]
@@ -134,7 +114,6 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
                 )
                 return
 
-        # Check for existing pending request
         with get_db() as conn:
             pending = conn.execute(
                 "SELECT id FROM registration_requests "
@@ -148,7 +127,6 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
             )
             return
 
-        # Name uniqueness check
         with get_db() as conn:
             taken = conn.execute(
                 "SELECT id FROM players WHERE LOWER(display_name)=LOWER(?)",
@@ -162,7 +140,6 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
             )
             return
 
-        # Insert request
         with get_db() as conn:
             conn.execute(
                 """INSERT INTO registration_requests
@@ -170,7 +147,6 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
                    VALUES (?,?,?,'pending')""",
                 (discord_id, username, name),
             )
-            # Also create a player row in pending state
             conn.execute(
                 """INSERT OR IGNORE INTO players
                    (discord_id, discord_username, display_name, status)
@@ -185,7 +161,6 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
             ephemeral=True,
         )
 
-        # Notify admins
         bot: commands.Bot = interaction.client
         await _notify_admins_registration(bot, discord_id, username, name)
 
@@ -229,19 +204,14 @@ class ApprovalView(discord.ui.View):
         self.display_name = display_name
         self.bot          = bot
 
-    def _is_admin(self, interaction: discord.Interaction) -> bool:
-        if not isinstance(interaction.user, discord.Member):
-            return False
-        return any(r.id == ADMIN_ROLE_ID for r in interaction.user.roles)
-
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
     async def approve(self, interaction: discord.Interaction,
                       button: discord.ui.Button) -> None:
-        if not self._is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
-        season, week = _current_week()
+        season, week = resolve_current_week()
         joined_week  = week["week_number"] if week else None
 
         with get_db() as conn:
@@ -252,12 +222,11 @@ class ApprovalView(discord.ui.View):
             )
             conn.execute(
                 """UPDATE registration_requests SET status='approved',
-                   reviewed_at=datetime('now','localtime'), reviewed_by=?
+                   reviewed_at=datetime('now'), reviewed_by=?
                    WHERE id=?""",
                 (str(interaction.user), self.request_id),
             )
 
-        # Disable buttons
         for item in self.children:
             item.disabled = True  # type: ignore
         await interaction.message.edit(view=self)
@@ -266,16 +235,15 @@ class ApprovalView(discord.ui.View):
             f"✅ **{self.display_name}** approved.", ephemeral=True
         )
 
-        # DM the player — log and mention them if DMs are disabled
         try:
             user = await self.bot.fetch_user(int(self.discord_id))
             await user.send(
-                f"🏈 You've been approved for **College Football Confidence Picks**!\n"
-                f"Head to the server and use the **Submit picks** button "
-                f"in #cfcp-picks to get started."
+                "🏈 You've been approved for **College Football Confidence Picks**!\n"
+                "Head to the server and use the **Submit picks** button "
+                "in #cfcp-picks to get started."
             )
         except discord.Forbidden:
-            await _log(
+            await log_to_channel(
                 self.bot,
                 f"Could not DM **{self.display_name}** — they have DMs disabled. "
                 "A mention has been posted in #cfcp-picks instead.",
@@ -290,17 +258,14 @@ class ApprovalView(discord.ui.View):
                         f"Use the **Submit picks** button above to get started.\n\n"
                         f"📬 **Action required — enable DMs:**\n"
                         f"This bot sends important notifications via DM throughout "
-                        f"the season (pick reminders, weekly recaps, etc). "
-                        f"To enable them:\n"
+                        f"the season. To enable them:\n"
                         f"1. Right-click the server name → **Privacy Settings**\n"
-                        f"2. Turn on **Direct Messages**\n"
-                        f"Or go to **User Settings → Privacy & Safety** and enable "
-                        f"**Allow direct messages from server members**.\n\n"
+                        f"2. Turn on **Direct Messages**\n\n"
                         f"*(This message will delete itself in 5 minutes.)*",
                         delete_after=300,
                     )
         except Exception as exc:
-            await _log(
+            await log_to_channel(
                 self.bot,
                 f"Unexpected error DMing **{self.display_name}**: {exc}",
                 title="DM failed", level="error",
@@ -312,7 +277,7 @@ class ApprovalView(discord.ui.View):
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny(self, interaction: discord.Interaction,
                    button: discord.ui.Button) -> None:
-        if not self._is_admin(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
@@ -324,7 +289,7 @@ class ApprovalView(discord.ui.View):
             )
             conn.execute(
                 """UPDATE registration_requests SET status='denied',
-                   reviewed_at=datetime('now','localtime'), reviewed_by=?
+                   reviewed_at=datetime('now'), reviewed_by=?
                    WHERE id=?""",
                 (str(interaction.user), self.request_id),
             )
@@ -345,30 +310,13 @@ class ApprovalView(discord.ui.View):
                 "You're welcome to apply again whenever you'd like."
             )
         except discord.Forbidden:
-            await _log(
+            await log_to_channel(
                 self.bot,
-                f"Could not DM **{self.display_name}** denial — "
-                "they likely have DMs from server members disabled.",
+                f"Could not DM **{self.display_name}** denial notice — DMs disabled.",
                 title="DM failed", level="warning",
             )
-            picks_ch_id = config_get("channel_picks")
-            if picks_ch_id:
-                picks_ch = self.bot.get_channel(int(picks_ch_id))
-                if isinstance(picks_ch, discord.TextChannel):
-                    await picks_ch.send(
-                        f"<@{self.discord_id}> — your CFCP registration was not "
-                        f"approved at this time. You're welcome to apply again "
-                        f"whenever you'd like.\n\n"
-                        f"📬 **Enable DMs for future notifications:**\n"
-                        f"1. Right-click the server name → **Privacy Settings**\n"
-                        f"2. Turn on **Direct Messages**\n"
-                        f"Or go to **User Settings → Privacy & Safety** and enable "
-                        f"**Allow direct messages from server members**.\n\n"
-                        f"*(This message will delete itself in 5 minutes.)*",
-                        delete_after=300,
-                    )
         except Exception as exc:
-            await _log(
+            await log_to_channel(
                 self.bot,
                 f"Unexpected error DMing **{self.display_name}**: {exc}",
                 title="DM failed", level="error",
@@ -378,17 +326,9 @@ class ApprovalView(discord.ui.View):
 
 
 # ── Picks submission flow ──────────────────────────────────────────────────────
-#
-#  Screen flow:
-#  PicksHubEphemeral  →  GameSelectView  →  TeamSelectView  →  SlotSelectView
-#                    ←─────────────────────────────────────────  (back button)
-#
-# Everything runs inside a single ephemeral message that gets edited in place.
-
 
 def _build_picks_embed(player_id: int, week: dict,
                        games: list, title: str = "Your picks") -> discord.Embed:
-    """Build the hub embed showing remaining games and confirmed picks."""
     with get_db() as conn:
         existing = conn.execute(
             """SELECT pk.game_id, pk.picked_team, pk.confidence_points,
@@ -411,9 +351,9 @@ def _build_picks_embed(player_id: int, week: dict,
     if existing:
         pick_lines = []
         for r in existing:
-            hr = f"#{r['home_rank']} " if r["home_rank"] else ""
-            ar = f"#{r['away_rank']} " if r["away_rank"] else ""
-            locked = r["game_status"] in ("in_progress", "final")
+            hr        = f"#{r['home_rank']} " if r["home_rank"] else ""
+            ar        = f"#{r['away_rank']} " if r["away_rank"] else ""
+            locked    = r["game_status"] in ("in_progress", "final")
             lock_icon = "🔒 " if locked else ""
             pick_lines.append(
                 f"`{r['confidence_points']:>2}` {lock_icon}{r['picked_team']}  "
@@ -428,8 +368,8 @@ def _build_picks_embed(player_id: int, week: dict,
     if remaining:
         rem_lines = []
         for g in remaining:
-            hr = f"#{g['home_rank']} " if g.get("home_rank") else ""
-            ar = f"#{g['away_rank']} " if g.get("away_rank") else ""
+            hr      = f"#{g['home_rank']} " if g.get("home_rank") else ""
+            ar      = f"#{g['away_rank']} " if g.get("away_rank") else ""
             kickoff = format_time_et(
                 datetime.fromisoformat(g["kickoff_time"]), include_date=True
             )
@@ -452,8 +392,6 @@ def _build_picks_embed(player_id: int, week: dict,
 
 
 class PicksHubEphemeralView(discord.ui.View):
-    """The main ephemeral hub — game select dropdown + close button."""
-
     def __init__(self, bot: commands.Bot, player_id: int,
                  week: dict, games: list):
         super().__init__(timeout=300)
@@ -464,7 +402,6 @@ class PicksHubEphemeralView(discord.ui.View):
         self._rebuild_select()
 
     def _rebuild_select(self) -> None:
-        # Remove existing select items before re-adding
         self.clear_items()
 
         with get_db() as conn:
@@ -483,8 +420,8 @@ class PicksHubEphemeralView(discord.ui.View):
         if available:
             options = []
             for g in available[:25]:
-                hr = f"#{g['home_rank']} " if g.get("home_rank") else ""
-                ar = f"#{g['away_rank']} " if g.get("away_rank") else ""
+                hr      = f"#{g['home_rank']} " if g.get("home_rank") else ""
+                ar      = f"#{g['away_rank']} " if g.get("away_rank") else ""
                 kickoff = format_time_et(
                     datetime.fromisoformat(g["kickoff_time"]), include_date=True
                 )
@@ -516,9 +453,7 @@ class PicksHubEphemeralView(discord.ui.View):
                 "Game not found.", ephemeral=True
             )
             return
-        view = TeamSelectView(
-            self.bot, self.player_id, self.week, self.games, game
-        )
+        view  = TeamSelectView(self.bot, self.player_id, self.week, self.games, game)
         embed = _build_team_embed(game)
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -530,8 +465,8 @@ class PicksHubEphemeralView(discord.ui.View):
 
 
 def _build_team_embed(game: dict) -> discord.Embed:
-    hr = f"#{game['home_rank']} " if game.get("home_rank") else ""
-    ar = f"#{game['away_rank']} " if game.get("away_rank") else ""
+    hr      = f"#{game['home_rank']} " if game.get("home_rank") else ""
+    ar      = f"#{game['away_rank']} " if game.get("away_rank") else ""
     kickoff = format_time_et(
         datetime.fromisoformat(game["kickoff_time"]), include_date=True
     )
@@ -553,8 +488,6 @@ def _build_team_embed(game: dict) -> discord.Embed:
 
 
 class TeamSelectView(discord.ui.View):
-    """Two team buttons + back."""
-
     def __init__(self, bot: commands.Bot, player_id: int,
                  week: dict, games: list, game: dict):
         super().__init__(timeout=300)
@@ -605,7 +538,7 @@ class TeamSelectView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        view = SlotSelectView(
+        view  = SlotSelectView(
             self.bot, self.player_id, self.week,
             self.games, self.game, team
         )
@@ -622,8 +555,7 @@ class TeamSelectView(discord.ui.View):
 
 def _build_slot_embed(player_id: int, week: dict,
                       game: dict, picked_team: str) -> discord.Embed:
-    used_slots    = get_used_slots_for_week(player_id, week["id"])
-    total_games   = week["game_count"]
+    total_games = week["game_count"]
 
     e = discord.Embed(
         title=f"You picked: {picked_team}",
@@ -632,17 +564,18 @@ def _build_slot_embed(player_id: int, week: dict,
         color=COLOR_GREEN,
     )
 
-    # Show current slot assignments for context
+    # FIX #2: Removed the broken gstatus query that used confidence_points as
+    # a game ID. Build slot context from pick_slots joined correctly.
     with get_db() as conn:
         slot_map = {
             r["confidence_points"]: r
             for r in conn.execute(
                 """SELECT ps.confidence_points, g.home_team, g.away_team,
-                          pk.picked_team
+                          pk.picked_team, g.status as game_status
                    FROM pick_slots ps
                    JOIN games g ON ps.game_id = g.id
-                   JOIN picks pk ON pk.player_id=ps.player_id
-                                AND pk.game_id=ps.game_id
+                   JOIN picks pk ON pk.player_id = ps.player_id
+                                AND pk.game_id   = ps.game_id
                    WHERE ps.player_id=? AND ps.week_id=?""",
                 (player_id, week["id"])
             ).fetchall()
@@ -651,15 +584,10 @@ def _build_slot_embed(player_id: int, week: dict,
     lines = []
     for slot in range(total_games, 0, -1):
         if slot in slot_map:
-            r = slot_map[slot]
-            locked = False
-            with get_db() as conn:
-                gstatus = conn.execute(
-                    "SELECT status, kickoff_time FROM games WHERE id=?",
-                    (slot_map[slot]["confidence_points"],)
-                ).fetchone()
+            r         = slot_map[slot]
+            lock_icon = "🔒 " if r["game_status"] in ("in_progress", "final") else ""
             lines.append(
-                f"`{slot:>2}` ✅ {r['picked_team']} "
+                f"`{slot:>2}` ✅ {lock_icon}{r['picked_team']} "
                 f"*({r['home_team']} vs {r['away_team']})*"
             )
         else:
@@ -676,8 +604,6 @@ def _build_slot_embed(player_id: int, week: dict,
 
 
 class SlotSelectView(discord.ui.View):
-    """Dropdown of available confidence slots."""
-
     def __init__(self, bot: commands.Bot, player_id: int, week: dict,
                  games: list, game: dict, picked_team: str):
         super().__init__(timeout=300)
@@ -691,7 +617,6 @@ class SlotSelectView(discord.ui.View):
         used_slots  = get_used_slots_for_week(player_id, week["id"])
         total_games = week["game_count"]
 
-        # Current slot for THIS game (if already picked)
         with get_db() as conn:
             existing = conn.execute(
                 "SELECT confidence_points FROM picks "
@@ -705,7 +630,6 @@ class SlotSelectView(discord.ui.View):
         options = []
         for slot in range(total_games, 0, -1):
             if slot in used_slots and slot != self.current_slot:
-                # Slot occupied by a different game — allow override with warning
                 with get_db() as conn:
                     occupant = conn.execute(
                         """SELECT g.home_team, g.away_team, pk.picked_team
@@ -756,7 +680,6 @@ class SlotSelectView(discord.ui.View):
 
         if value.startswith("override_"):
             slot = int(value.split("_")[1])
-            # Show confirmation before overriding
             view = OverrideConfirmView(
                 self.bot, self.player_id, self.week,
                 self.games, self.game, self.picked_team, slot
@@ -826,8 +749,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                      player_id: int, week: dict, games: list,
                      game: dict, picked_team: str, slot: int,
                      override: bool = False) -> None:
-    """Write the pick to DB and return to hub."""
-
     if _game_is_locked(game):
         await interaction.response.send_message(
             "This game has kicked off — pick is now locked.", ephemeral=True
@@ -835,7 +756,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
         return
 
     with get_db() as conn:
-        # If override: remove the existing pick holding this slot
         if override:
             displaced = conn.execute(
                 """SELECT ps.game_id FROM pick_slots ps
@@ -853,8 +773,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                     (player_id, week["id"], slot)
                 )
 
-        # If player is changing team on the SAME game (same slot),
-        # just update picked_team — no slot change needed
         existing_same_game = conn.execute(
             "SELECT id, confidence_points FROM picks "
             "WHERE player_id=? AND game_id=?",
@@ -865,11 +783,10 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
             old_slot = existing_same_game["confidence_points"]
             conn.execute(
                 "UPDATE picks SET picked_team=?, confidence_points=?, "
-                "submitted_at=datetime('now','localtime') "
+                "submitted_at=datetime('now') "
                 "WHERE player_id=? AND game_id=?",
                 (picked_team, slot, player_id, game["id"])
             )
-            # Update slot table
             conn.execute(
                 "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
                 "AND confidence_points=?",
@@ -879,11 +796,10 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
             conn.execute(
                 """INSERT INTO picks(player_id, game_id, picked_team,
                    confidence_points, submitted_at)
-                   VALUES (?,?,?,?,datetime('now','localtime'))""",
+                   VALUES (?,?,?,?,datetime('now'))""",
                 (player_id, game["id"], picked_team, slot)
             )
 
-        # Upsert slot table
         conn.execute(
             """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
                VALUES (?,?,?,?)
@@ -892,21 +808,24 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
             (player_id, week["id"], slot, game["id"])
         )
 
-    # Return to hub
     hub_view = PicksHubEphemeralView(bot, player_id, week, games)
     embed    = _build_picks_embed(player_id, week, games)
     await interaction.response.edit_message(embed=embed, view=hub_view)
     await _refresh_picks_hub(bot)
 
 
-# ── Per-game lock task ─────────────────────────────────────────────────────────
+# ── Forfeit assignment ─────────────────────────────────────────────────────────
 
 async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
     """
     When a game's kickoff passes, assign forfeit picks to any player
     who hasn't picked it. Give them the lowest unused confidence slot.
+
+    FIX #8: Uses INSERT OR IGNORE on both tables so re-runs on restart are safe.
+    FIX #10: Uses get_all_scoreable_players() so withdrawn players receive forfeits.
     """
-    players = get_all_active_players()
+    from database import get_all_scoreable_players
+    players = get_all_scoreable_players()
     with get_db() as conn:
         for player in players:
             existing = conn.execute(
@@ -916,7 +835,6 @@ async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
             if existing:
                 continue
 
-            # Find lowest unused slot for this player this week
             used = {r["confidence_points"] for r in conn.execute(
                 "SELECT confidence_points FROM pick_slots "
                 "WHERE player_id=? AND week_id=?",
@@ -937,10 +855,11 @@ async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
             if forfeit_slot is None:
                 continue
 
+            # FIX #8: INSERT OR IGNORE prevents duplicate on restart
             conn.execute(
-                """INSERT INTO picks(player_id, game_id, picked_team,
+                """INSERT OR IGNORE INTO picks(player_id, game_id, picked_team,
                    confidence_points, is_forfeit, submitted_at)
-                   VALUES (?,?,NULL,?,1,datetime('now','localtime'))""",
+                   VALUES (?,?,NULL,?,1,datetime('now'))""",
                 (player["id"], game["id"], forfeit_slot)
             )
             conn.execute(
@@ -951,7 +870,7 @@ async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
                 (player["id"], week_id, forfeit_slot, game["id"])
             )
 
-    await _log(
+    await log_to_channel(
         bot,
         f"Picks locked for **{game['home_team']} vs {game['away_team']}** — "
         "forfeits assigned to players who missed this game.",
@@ -960,7 +879,7 @@ async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
     )
 
 
-# ── Current picks view (with history button) ──────────────────────────────────
+# ── Current picks view ────────────────────────────────────────────────────────
 
 class CurrentPicksView(discord.ui.View):
     def __init__(self, bot: commands.Bot, player_id: int):
@@ -968,8 +887,7 @@ class CurrentPicksView(discord.ui.View):
         self.bot       = bot
         self.player_id = player_id
 
-    @discord.ui.button(label="View pick history",
-                       style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="View pick history", style=discord.ButtonStyle.secondary)
     async def history(self, interaction: discord.Interaction,
                       button: discord.ui.Button) -> None:
         from cogs.stats import open_pick_history
@@ -1023,7 +941,7 @@ class PicksHubView(discord.ui.View):
         if not player:
             return
 
-        season, week = _current_week()
+        season, week = resolve_current_week()
         if not week:
             await interaction.response.send_message(
                 "No week is currently active. Check back soon!",
@@ -1065,9 +983,8 @@ class PicksHubView(discord.ui.View):
         player = await self._get_active_player(interaction)
         if not player:
             return
-        season, week = _current_week()
+        season, week = resolve_current_week()
         if not week:
-            # No active week — show full pick history instead
             from cogs.stats import open_pick_history
             await open_pick_history(interaction)
             return
@@ -1080,7 +997,6 @@ class PicksHubView(discord.ui.View):
             player["id"], dict(week), [dict(g) for g in games],
             title="Current picks"
         )
-        # Add a "View history" button alongside
         view = CurrentPicksView(interaction.client, player["id"])
         await interaction.response.send_message(
             embed=embed, view=view, ephemeral=True
@@ -1146,7 +1062,7 @@ class WithdrawConfirmView(discord.ui.View):
                 (self.player_id,)
             )
         await _refresh_picks_hub(self.bot)
-        await _log(
+        await log_to_channel(
             self.bot,
             f"**{self.display_name}** has withdrawn from the competition.",
             title="Player withdrawn",
@@ -1180,7 +1096,7 @@ class PicksCog(commands.Cog):
         """Every minute: check for games whose kickoff has passed,
         assign forfeits, update embeds."""
         try:
-            season, week = _current_week()
+            season, week = resolve_current_week()
             if not week:
                 return
 
@@ -1196,13 +1112,12 @@ class PicksCog(commands.Cog):
 
             for game in games:
                 game_dict = dict(game)
-                secs = seconds_until(game_dict["kickoff_time"])
+                # FIX #1 / #3: use seconds_until_iso
+                secs = seconds_until_iso(game_dict["kickoff_time"])
 
                 if secs <= 0 and secs > -300:
-                    # Just kicked off — assign forfeits
                     await assign_forfeits(self.bot, game_dict, week["id"])
 
-                # Also poll live score for in-progress / just-started games
                 if secs <= 0 and game_dict.get("espn_game_id") and \
                    not game_dict["espn_game_id"].startswith("manual_"):
                     result = fetch_game_status(game_dict["espn_game_id"])

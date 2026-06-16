@@ -1,284 +1,203 @@
 from __future__ import annotations
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
+from discord.ext import tasks
 import logging
-from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 
-from database import (get_db, config_get, get_active_season,
-                      get_all_active_players, get_unpicked_games_for_player)
-from utils.embeds import log_embed
-from utils.time_utils import (now_et, group_games_by_day,
-                               first_kickoff_of_day, format_time_et,
-                               seconds_until, countdown_label)
+from config import NOTIF_24HR, NOTIF_30MIN, NOTIF_CHECK_INTERVAL
+from database import get_db, get_all_active_players
+# FIX #25: shared helpers
+from utils.helpers import resolve_current_week, send_dm, log_to_channel
+from utils.time_utils import (format_time_et, parse_iso,
+                              group_games_by_day, first_kickoff_of_day,
+                              seconds_until)
 
 log = logging.getLogger(__name__)
-ET  = ZoneInfo("America/New_York")
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Notification senders ─────────────────────────────────────────────────────
 
-async def _log(bot: commands.Bot, description: str,
-               title: str = "Notifications", level: str = "info") -> None:
-    ch_id = config_get("channel_logs")
-    if not ch_id:
-        return
-    ch = bot.get_channel(int(ch_id))
-    if isinstance(ch, discord.TextChannel):
-        await ch.send(embed=log_embed(title, description, level))
-
-
-def _notif_already_sent(player_id: int, week_id: int,
-                        game_day: str, notif_type: str) -> bool:
-    with get_db() as conn:
-        row = conn.execute(
-            """SELECT id FROM notifications_sent
-               WHERE player_id=? AND week_id=? AND game_day=? AND notif_type=?""",
-            (player_id, week_id, game_day, notif_type)
-        ).fetchone()
-    return row is not None
-
-
-def _mark_sent(player_id: int, week_id: int,
-               game_day: str, notif_type: str) -> None:
-    with get_db() as conn:
-        conn.execute(
-            """INSERT OR IGNORE INTO notifications_sent
-               (player_id, week_id, game_day, notif_type)
-               VALUES (?,?,?,?)""",
-            (player_id, week_id, game_day, notif_type)
-        )
-
-
-def _get_current_week():
-    season = get_active_season()
-    if not season:
-        return None, None
-    with get_db() as conn:
-        week = conn.execute(
-            "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
-            (season["id"],)
-        ).fetchone()
-    return season, week
-
-
-async def _send_dm(bot: commands.Bot, discord_id: str,
-                   message: str) -> bool:
-    """Send a DM. Returns True on success, False if DMs are disabled."""
-    try:
-        user = await bot.fetch_user(int(discord_id))
-        await user.send(message)
-        return True
-    except discord.Forbidden:
-        return False
-    except Exception as exc:
-        log.warning(f"DM to {discord_id} failed: {exc}")
-        return False
-
-
-# ── Notification: week open ────────────────────────────────────────────────────
-
-async def notify_week_open(bot: commands.Bot, week_id: int,
-                           week_number: int, game_count: int) -> None:
+async def _notify_missing_picks(bot: commands.Bot, week: dict,
+                                game_day: str, games_on_day: list,
+                                notif_type: str, hours_label: str) -> None:
     """
-    Fire once when admin loads a new week.
-    Sends a single DM to all active players with DM notifications enabled.
+    For every active player who hasn't picked all games kicking off on
+    `game_day`, send a DM reminder. Records the send in notifications_sent
+    so it's not duplicated.
     """
     players = get_all_active_players()
-    sent = 0
-
-    with get_db() as conn:
-        games = conn.execute(
-            "SELECT kickoff_time FROM games WHERE week_id=? ORDER BY kickoff_time",
-            (week_id,)
-        ).fetchall()
-
-    first_kick = ""
-    if games:
-        first_kick = format_time_et(
-            datetime.fromisoformat(games[0]["kickoff_time"])
-        )
+    game_ids_today = {g["id"] for g in games_on_day}
 
     for player in players:
         if not player["dm_notifications"]:
             continue
-        if _notif_already_sent(player["id"], week_id, "all", "week_open"):
+
+        with get_db() as conn:
+            already_sent = conn.execute(
+                """SELECT 1 FROM notifications_sent
+                   WHERE player_id=? AND week_id=? AND game_day=? AND notif_type=?""",
+                (player["id"], week["id"], game_day, notif_type)
+            ).fetchone()
+            if already_sent:
+                continue
+
+            picked_ids = {
+                r["game_id"] for r in conn.execute(
+                    """SELECT game_id FROM picks
+                       WHERE player_id=? AND is_forfeit=0
+                       AND game_id IN (SELECT id FROM games WHERE week_id=?)""",
+                    (player["id"], week["id"])
+                ).fetchall()
+            }
+
+        missing = game_ids_today - picked_ids
+        if not missing:
+            with get_db() as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO notifications_sent
+                       (player_id, week_id, game_day, notif_type)
+                       VALUES (?,?,?,?)""",
+                    (player["id"], week["id"], game_day, notif_type)
+                )
             continue
 
-        msg = (
-            f"🏈 **Week {week_number} picks are now open!**\n\n"
-            f"**{game_count} games** are available to pick this week.\n"
-            f"First kickoff: **{first_kick}**\n\n"
-            f"Picks lock at each game's individual kickoff time — "
-            f"head to #cfcp-picks to submit yours!"
+        missing_games = [g for g in games_on_day if g["id"] in missing]
+        lines = []
+        for g in missing_games:
+            hr = f"#{g['home_rank']} " if g["home_rank"] else ""
+            ar = f"#{g['away_rank']} " if g["away_rank"] else ""
+            kickoff_str = format_time_et(parse_iso(g["kickoff_time"]))
+            lines.append(f"• {hr}{g['home_team']} vs {ar}{g['away_team']} — {kickoff_str}")
+
+        message = (
+            f"🏈 **CFCP reminder — {hours_label} until kickoff!**\n\n"
+            f"You haven't picked **{len(missing_games)}** game(s) "
+            f"kicking off soon:\n"
+            + "\n".join(lines) +
+            "\n\nHead to #cfcp-picks and use **Submit picks** to lock in "
+            "your picks before kickoff!"
         )
-        success = await _send_dm(bot, player["discord_id"], msg)
-        if success:
-            _mark_sent(player["id"], week_id, "all", "week_open")
-            sent += 1
 
-    await _log(
-        bot,
-        f"Week {week_number} open notification sent to {sent} players.",
-        title="Week open DMs", level="info",
-    )
+        sent = await send_dm(bot, player["discord_id"], message)
+
+        with get_db() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO notifications_sent
+                   (player_id, week_id, game_day, notif_type)
+                   VALUES (?,?,?,?)""",
+                (player["id"], week["id"], game_day, notif_type)
+            )
+
+        if not sent:
+            picks_ch_id = None
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT value FROM bot_config WHERE key='channel_picks'"
+                ).fetchone()
+                picks_ch_id = row["value"] if row else None
+            if picks_ch_id:
+                ch = bot.get_channel(int(picks_ch_id))
+                if isinstance(ch, discord.TextChannel):
+                    await ch.send(
+                        f"<@{player['discord_id']}> — reminder: you have "
+                        f"**{len(missing_games)}** unpicked game(s) "
+                        f"kicking off in {hours_label}! "
+                        f"*(DMs are off — enable them to get these privately.)*",
+                        delete_after=3600,
+                    )
 
 
-# ── Notification: 24hr and 30min warnings ─────────────────────────────────────
+# ── Weekly recap ──────────────────────────────────────────────────────────────
 
-async def run_notification_check(bot: commands.Bot) -> None:
-    """
-    Called every 15 minutes by the scheduler.
-    For each player, for each calendar day group of games:
-      - If within 24hr of first kickoff that day AND not yet sent → send 24hr DM
-      - If within 30min of first kickoff that day AND not yet sent → send 30min DM
-    Only fires if the player has unpicked games in that day group.
-    """
-    season, week = _get_current_week()
+async def send_weekly_recap(bot: commands.Bot, week_id: int) -> None:
+    """DM every active player their weekly results."""
+    with get_db() as conn:
+        week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
     if not week:
         return
 
-    with get_db() as conn:
-        all_games = conn.execute(
-            """SELECT * FROM games WHERE week_id=? AND status='scheduled'
-               ORDER BY kickoff_time""",
-            (week["id"],)
-        ).fetchall()
-
-    if not all_games:
-        return
-
-    # Group all scheduled games by ET calendar day
-    day_groups = group_games_by_day([dict(g) for g in all_games])
-    players    = get_all_active_players()
+    players = get_all_active_players()
 
     for player in players:
         if not player["dm_notifications"]:
             continue
-        if player["status"] != "active":
+
+        already = None
+        with get_db() as conn:
+            already = conn.execute(
+                """SELECT 1 FROM notifications_sent
+                   WHERE player_id=? AND week_id=? AND game_day='recap'
+                   AND notif_type='recap'""",
+                (player["id"], week_id)
+            ).fetchone()
+        if already:
             continue
 
-        # Get this player's unpicked scheduled games
-        unpicked = get_unpicked_games_for_player(player["id"], week["id"])
-        unpicked_ids = {g["id"] for g in unpicked}
+        with get_db() as conn:
+            ws = conn.execute(
+                "SELECT * FROM weekly_scores WHERE player_id=? AND week_id=?",
+                (player["id"], week_id)
+            ).fetchone()
+            picks = conn.execute(
+                """SELECT pk.*, g.home_team, g.away_team, g.winner, g.home_score,
+                          g.away_score
+                   FROM picks pk JOIN games g ON pk.game_id = g.id
+                   WHERE pk.player_id=? AND g.week_id=?
+                   ORDER BY pk.confidence_points DESC""",
+                (player["id"], week_id)
+            ).fetchall()
 
-        for day_str, day_games in day_groups.items():
-            # Filter to only games this player hasn't picked yet
-            unpicked_today = [g for g in day_games if g["id"] in unpicked_ids]
-            if not unpicked_today:
-                continue
+        if not ws:
+            continue
 
-            first_kick   = first_kickoff_of_day(day_games)
-            secs_to_kick = seconds_until(first_kick.isoformat())
+        lines = []
+        for p in picks:
+            if p["is_forfeit"]:
+                icon = "⛔"
+                detail = "missed pick — forfeited"
+            elif p["winner"] is None:
+                icon = "🤝"
+                detail = (
+                    f"{p['home_team']} {p['home_score']}-{p['away_score']} "
+                    f"{p['away_team']} (tie)"
+                )
+            elif p["is_correct"] == 1:
+                icon = "✅"
+                detail = f"{p['picked_team']} won"
+            else:
+                icon = "❌"
+                detail = f"{p['picked_team']} lost"
+            lines.append(f"`{p['confidence_points']:>2}` {icon} {detail}")
 
-            # ── 24hr window ──────────────────────────────────────────────────
-            if 0 < secs_to_kick <= 86400:
-                if not _notif_already_sent(
-                    player["id"], week["id"], day_str, "24hr"
-                ):
-                    msg = _build_24hr_message(
-                        week["week_number"], day_str,
-                        unpicked_today, first_kick
-                    )
-                    success = await _send_dm(bot, player["discord_id"], msg)
-                    if success:
-                        _mark_sent(player["id"], week["id"], day_str, "24hr")
-                        log.info(
-                            f"24hr DM sent to {player['display_name']} "
-                            f"for {day_str}"
-                        )
+        rank_str = f" — ranked **#{ws['weekly_rank']}**" if ws["weekly_rank"] else ""
 
-            # ── 30min window ─────────────────────────────────────────────────
-            if 0 < secs_to_kick <= 1800:
-                if not _notif_already_sent(
-                    player["id"], week["id"], day_str, "30min"
-                ):
-                    msg = _build_30min_message(
-                        week["week_number"], day_str,
-                        unpicked_today, day_games, first_kick
-                    )
-                    success = await _send_dm(bot, player["discord_id"], msg)
-                    if success:
-                        _mark_sent(player["id"], week["id"], day_str, "30min")
-                        log.info(
-                            f"30min DM sent to {player['display_name']} "
-                            f"for {day_str}"
-                        )
-
-
-def _build_24hr_message(week_number: int, day_str: str,
-                        unpicked_today: list, first_kick: datetime) -> str:
-    day_label = first_kick.strftime("%A %b ") + str(first_kick.day)
-    count     = len(unpicked_today)
-    game_lines = []
-    for g in unpicked_today:
-        kick = format_time_et(
-            datetime.fromisoformat(g["kickoff_time"]), include_date=False
-        )
-        hr = f"#{g['home_rank']} " if g.get("home_rank") else ""
-        ar = f"#{g['away_rank']} " if g.get("away_rank") else ""
-        game_lines.append(
-            f"• {hr}{g['home_team']} vs {ar}{g['away_team']} — {kick}"
+        message = (
+            f"📊 **Week {week['week_number']} Recap**{rank_str}\n\n"
+            f"Score: **{ws['points_earned']}/{ws['total_possible']}** points  "
+            f"({ws['correct_picks']} correct"
+            + (f", {ws['forfeited_picks']} forfeited" if ws["forfeited_picks"] else "")
+            + ")\n\n"
+            + "\n".join(lines) +
+            "\n\nCheck #cfcp-standings for the full leaderboard!"
         )
 
-    return (
-        f"⏰ **24 hours to kickoff — Week {week_number}**\n\n"
-        f"You have **{count} unpicked game{'s' if count != 1 else ''}** "
-        f"on **{day_label}**:\n"
-        + "\n".join(game_lines)
-        + f"\n\nPicks lock at each game's kickoff time. "
-        f"Head to #cfcp-picks to submit yours!"
-    )
+        sent = await send_dm(bot, player["discord_id"], message)
 
-
-def _build_30min_message(week_number: int, day_str: str,
-                         unpicked_today: list, all_day_games: list,
-                         first_kick: datetime) -> str:
-    day_label = first_kick.strftime("%A %b ") + str(first_kick.day)
-
-    # Split unpicked into imminent (kickoff ≤ 30min) vs later today
-    imminent = []
-    later    = []
-    for g in unpicked_today:
-        secs = seconds_until(g["kickoff_time"])
-        if secs <= 1800:
-            imminent.append(g)
-        else:
-            later.append(g)
-
-    lines = ["**Last call — picks locking soon:**\n"]
-
-    if imminent:
-        for g in imminent:
-            kick    = format_time_et(
-                datetime.fromisoformat(g["kickoff_time"]), include_date=False
-            )
-            cd      = countdown_label(g["kickoff_time"])
-            hr = f"#{g['home_rank']} " if g.get("home_rank") else ""
-            ar = f"#{g['away_rank']} " if g.get("away_rank") else ""
-            lines.append(
-                f"🔴 **{hr}{g['home_team']} vs {ar}{g['away_team']}** "
-                f"— {kick} *(kicks off in {cd})*"
+        with get_db() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO notifications_sent
+                   (player_id, week_id, game_day, notif_type)
+                   VALUES (?,?,'recap','recap')""",
+                (player["id"], week_id)
             )
 
-    if later:
-        lines.append("\n**Still to pick later today:**")
-        for g in later:
-            kick = format_time_et(
-                datetime.fromisoformat(g["kickoff_time"]), include_date=False
+        if not sent:
+            await log_to_channel(
+                bot,
+                f"Could not DM weekly recap to **{player['display_name']}** "
+                "— DMs disabled.",
+                title="DM failed", level="warning",
             )
-            hr = f"#{g['home_rank']} " if g.get("home_rank") else ""
-            ar = f"#{g['away_rank']} " if g.get("away_rank") else ""
-            lines.append(
-                f"• {hr}{g['home_team']} vs {ar}{g['away_team']} — {kick}"
-            )
-
-    lines.append("\nHead to #cfcp-picks to get your picks in!")
-
-    return (
-        f"🚨 **Week {week_number} — last call ({day_label})**\n\n"
-        + "\n".join(lines)
-    )
 
 
 # ── Cog ────────────────────────────────────────────────────────────────────────
@@ -286,20 +205,54 @@ def _build_30min_message(week_number: int, day_str: str,
 class NotificationsCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.notif_scheduler.start()
+        self.notification_checker.start()
 
     def cog_unload(self) -> None:
-        self.notif_scheduler.cancel()
+        self.notification_checker.cancel()
 
-    @tasks.loop(minutes=15)
-    async def notif_scheduler(self) -> None:
+    @tasks.loop(seconds=NOTIF_CHECK_INTERVAL)
+    async def notification_checker(self) -> None:
         try:
-            await run_notification_check(self.bot)
-        except Exception as exc:
-            log.error(f"notif_scheduler error: {exc}", exc_info=True)
+            season, week = resolve_current_week()
+            if not week:
+                return
 
-    @notif_scheduler.before_loop
-    async def before_notif_scheduler(self) -> None:
+            with get_db() as conn:
+                games = conn.execute(
+                    """SELECT * FROM games
+                       WHERE week_id=? AND status='scheduled'""",
+                    (week["id"],)
+                ).fetchall()
+
+            if not games:
+                return
+
+            games_dicts = [dict(g) for g in games]
+            day_groups  = group_games_by_day(games_dicts)
+
+            for game_day, day_games in day_groups.items():
+                first_kick = first_kickoff_of_day(day_games)
+                # FIX #1: first_kickoff_of_day returns a datetime object,
+                # so seconds_until() (datetime-only) is correct here.
+                # Raw ISO strings from the DB must instead go through
+                # seconds_until_iso() — see picks.py's _game_is_locked().
+                secs_to_first = seconds_until(first_kick)
+
+                if NOTIF_24HR - NOTIF_CHECK_INTERVAL <= secs_to_first <= NOTIF_24HR:
+                    await _notify_missing_picks(
+                        self.bot, week, game_day, day_games, "24hr", "24 hours"
+                    )
+
+                if NOTIF_30MIN - NOTIF_CHECK_INTERVAL <= secs_to_first <= NOTIF_30MIN:
+                    await _notify_missing_picks(
+                        self.bot, week, game_day, day_games, "30min", "30 minutes"
+                    )
+
+        except Exception as exc:
+            log.error(f"notification_checker error: {exc}", exc_info=True)
+
+    @notification_checker.before_loop
+    async def before_notification_checker(self) -> None:
         await self.bot.wait_until_ready()
 
 

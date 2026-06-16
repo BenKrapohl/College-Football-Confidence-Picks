@@ -6,257 +6,290 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import (ADMIN_ROLE_ID, GUILD_ID, POLL_AP, POLL_CFP)
-from database import (get_db, config_get, config_set,
-                      get_active_season, get_all_active_players)
+from config import POLL_AP, POLL_CFP, SEASON_YEAR
+from database import (get_db, config_get, config_set, get_active_season,
+                      create_season, end_active_season)
+# FIX #25: shared helpers, no more duplicated _log/_is_admin/_latest_week
+from utils.helpers import is_admin, log_to_channel, resolve_latest_week
+from utils.embeds import game_embed
 from utils.espn import fetch_rankings, fetch_week_games
-from utils.embeds import admin_panel_embed, picks_hub_embed, game_embed, log_embed
-from utils.time_utils import format_time_et
+from utils.time_utils import now_et
 
 log = logging.getLogger(__name__)
 ET  = ZoneInfo("America/New_York")
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Pick split data helper (FIX #4) ────────────────────────────────────────────
 
-def is_admin(interaction: discord.Interaction) -> bool:
-    if not isinstance(interaction.user, discord.Member):
-        return False
-    return any(r.id == ADMIN_ROLE_ID for r in interaction.user.roles)
-
-
-async def _log(bot: commands.Bot, description: str,
-               title: str = "Admin action", level: str = "info") -> None:
-    ch_id = config_get("channel_logs")
-    if not ch_id:
-        return
-    ch = bot.get_channel(int(ch_id))
-    if isinstance(ch, discord.TextChannel):
-        await ch.send(embed=log_embed(title, description, level))
-
-
-def _latest_week(season_id: int):
+def _get_player_picks_for_game(game_id: int) -> list[dict]:
+    """
+    FIX #4: Centralized helper to fetch all non-forfeit picks for a game,
+    joined with player display names. Used by post_game_embeds() and
+    update_single_game_embed() so the pick-split bar / reveal actually renders.
+    """
     with get_db() as conn:
-        return conn.execute(
-            "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
-            (season_id,)
+        rows = conn.execute(
+            """SELECT pk.picked_team, pk.is_forfeit, pl.display_name
+               FROM picks pk
+               JOIN players pl ON pk.player_id = pl.id
+               WHERE pk.game_id=? AND pl.status IN ('active','withdrawn')""",
+            (game_id,)
+        ).fetchall()
+    return [dict(r) for r in rows if r["picked_team"] is not None]
+
+
+def _get_total_active_players() -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as c FROM players WHERE status IN ('active','withdrawn')"
         ).fetchone()
+    return row["c"] if row else 0
 
 
-# ── Game embed management ──────────────────────────────────────────────────────
+# ── Game embed posting / updating ──────────────────────────────────────────────
 
-async def post_game_embeds(bot: commands.Bot, week_id: int) -> None:
-    """Clear #cfcp-games and post one embed per game, storing message IDs."""
+async def post_game_embeds(bot: commands.Bot, week: dict) -> None:
+    """Post one embed per game to #cfcp-games for the given week."""
     ch_id = config_get("channel_games")
     if not ch_id:
+        log.warning("channel_games not configured — skipping game embed post.")
         return
     ch = bot.get_channel(int(ch_id))
     if not isinstance(ch, discord.TextChannel):
         return
+
+    picks_reveal_raw = config_get("picks_reveal", "1")
+    picks_reveal     = picks_reveal_raw == "1"
+    total_players    = _get_total_active_players()
 
     with get_db() as conn:
         games = conn.execute(
             "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
-            (week_id,)
+            (week["id"],)
         ).fetchall()
 
-    if not games:
-        return
-
-    try:
-        await ch.purge(limit=100)
-    except discord.Forbidden:
-        pass
-
-    picks_reveal   = config_get("picks_reveal", "1") == "1"
-    total_players  = len(get_all_active_players())
-
     for game in games:
-        embed = game_embed(dict(game), picks_reveal=picks_reveal,
-                           total_players=total_players)
+        game_dict = dict(game)
+        # FIX #4: actually fetch and pass player picks
+        player_picks = _get_player_picks_for_game(game_dict["id"])
+        embed = game_embed(
+            game_dict,
+            player_picks=player_picks,
+            picks_reveal=picks_reveal,
+            total_players=total_players,
+        )
         msg = await ch.send(embed=embed)
         with get_db() as conn:
             conn.execute(
                 "UPDATE games SET discord_message_id=? WHERE id=?",
-                (str(msg.id), game["id"])
+                (str(msg.id), game_dict["id"])
             )
+
+    await log_to_channel(
+        bot,
+        f"Posted {len(games)} game embeds to #cfcp-games for Week {week['week_number']}.",
+        title="Games posted",
+        level="success",
+    )
 
 
 async def update_single_game_embed(bot: commands.Bot, game_id: int) -> None:
-    """Edit the existing Discord message for one game."""
+    """Re-render a single game's embed (e.g. after a score update or kickoff lock)."""
     with get_db() as conn:
         game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
-    if not game or not game["discord_message_id"]:
+    if not game:
         return
+
     ch_id = config_get("channel_games")
     if not ch_id:
         return
     ch = bot.get_channel(int(ch_id))
     if not isinstance(ch, discord.TextChannel):
         return
+
+    if not game["discord_message_id"]:
+        return
+
     try:
         msg = await ch.fetch_message(int(game["discord_message_id"]))
-        picks_reveal  = config_get("picks_reveal", "1") == "1"
-        total_players = len(get_all_active_players())
-        await msg.edit(embed=game_embed(
-            dict(game), picks_reveal=picks_reveal, total_players=total_players
-        ))
-    except discord.NotFound:
-        pass
-
-
-async def _refresh_all_panels(bot: commands.Bot) -> None:
-    """Convenience: refresh admin + picks hub after any week mutation."""
-    from cogs.setup import refresh_admin_panel, refresh_picks_hub
-    season = get_active_season()
-    if not season:
+    except (discord.NotFound, discord.HTTPException):
         return
-    week = _latest_week(season["id"])
-    guild = bot.get_guild(GUILD_ID)
-    poll_type    = config_get("active_poll", POLL_AP)
-    picks_reveal = config_get("picks_reveal", "1") == "1"
 
-    await refresh_admin_panel(
-        bot, guild,
-        week=dict(week) if week else None,
-        season=dict(season),
-        poll_type=poll_type,
+    picks_reveal_raw = config_get("picks_reveal", "1")
+    picks_reveal     = picks_reveal_raw == "1"
+    total_players    = _get_total_active_players()
+
+    game_dict     = dict(game)
+    # FIX #4: actually fetch and pass player picks here too
+    player_picks  = _get_player_picks_for_game(game_dict["id"])
+    embed = game_embed(
+        game_dict,
+        player_picks=player_picks,
         picks_reveal=picks_reveal,
+        total_players=total_players,
     )
-
-    if week:
-        with get_db() as conn:
-            game_rows = conn.execute(
-                "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
-                (week["id"],)
-            ).fetchall()
-        players = get_all_active_players()
-        # Determine submitted status for each player
-        player_list = []
-        with get_db() as conn:
-            for p in players:
-                count = conn.execute(
-                    """SELECT COUNT(*) as c FROM picks pk
-                       JOIN games g ON pk.game_id = g.id
-                       WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0""",
-                    (p["id"], week["id"])
-                ).fetchone()["c"]
-                player_list.append({**dict(p), "submitted": count == week["game_count"]})
-
-        await refresh_picks_hub(
-            bot,
-            week=dict(week),
-            games=[dict(g) for g in game_rows],
-            players=player_list,
-        )
+    try:
+        await msg.edit(embed=embed)
+    except discord.HTTPException as exc:
+        log.warning(f"Failed to edit game embed {game_id}: {exc}")
 
 
-# ── Modals ─────────────────────────────────────────────────────────────────────
+async def update_all_game_embeds(bot: commands.Bot, week_id: int) -> None:
+    """Refresh all game embeds for a week — e.g. after toggling pick reveal."""
+    with get_db() as conn:
+        games = conn.execute(
+            "SELECT id FROM games WHERE week_id=?", (week_id,)
+        ).fetchall()
+    for g in games:
+        await update_single_game_embed(bot, g["id"])
 
-class LoadWeekModal(discord.ui.Modal, title="Load week"):
+
+# ── Load Week flow ───────────────────────────────────────────────────────────
+
+class LoadWeekModal(discord.ui.Modal, title="Load a week"):
     week_number = discord.ui.TextInput(
-        label="Week number", placeholder="1", max_length=2, min_length=1
+        label="Week number",
+        placeholder="e.g. 1",
+        min_length=1, max_length=2,
     )
     start_date = discord.ui.TextInput(
-        label="Start date (YYYYMMDD)", placeholder="20260829",
-        max_length=8, min_length=8
+        label="Start date (YYYYMMDD)",
+        placeholder="e.g. 20260829",
+        min_length=8, max_length=8,
     )
     end_date = discord.ui.TextInput(
-        label="End date (YYYYMMDD)", placeholder="20260901",
-        max_length=8, min_length=8
+        label="End date (YYYYMMDD)",
+        placeholder="e.g. 20260901",
+        min_length=8, max_length=8,
     )
 
-    def __init__(self, bot: commands.Bot):
-        super().__init__()
-        self.bot = bot
-
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
+        # FIX #5: wrap int() conversion in try/except
         try:
-            week_num = int(self.week_number.value.strip())
+            wk_num = int(self.week_number.value.strip())
         except ValueError:
-            await interaction.followup.send(
-                "Week number must be a whole number.", ephemeral=True
+            await interaction.response.send_message(
+                f"`{self.week_number.value}` is not a valid week number. "
+                "Please enter a whole number (e.g. `1`).",
+                ephemeral=True,
             )
             return
 
-        start = self.start_date.value.strip()
-        end   = self.end_date.value.strip()
+        start_raw = self.start_date.value.strip()
+        end_raw   = self.end_date.value.strip()
+
         try:
-            datetime.strptime(start, "%Y%m%d")
-            datetime.strptime(end,   "%Y%m%d")
+            start_dt = datetime.strptime(start_raw, "%Y%m%d")
+            end_dt   = datetime.strptime(end_raw, "%Y%m%d")
         except ValueError:
-            await interaction.followup.send(
-                "Invalid date — use YYYYMMDD format (e.g. 20260829).", ephemeral=True
+            await interaction.response.send_message(
+                "Dates must be in `YYYYMMDD` format, e.g. `20260829`.",
+                ephemeral=True,
             )
             return
+
+        if end_dt < start_dt:
+            await interaction.response.send_message(
+                "End date must be on or after the start date.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         season = get_active_season()
         if not season:
-            await interaction.followup.send("No active season found.", ephemeral=True)
-            return
+            create_season(SEASON_YEAR, POLL_AP)
+            season = get_active_season()
 
-        poll_type = config_get("active_poll", POLL_AP)
-
-        await interaction.followup.send(
-            f"Fetching Week {week_num} from ESPN ({start}–{end})…", ephemeral=True
-        )
+        poll_type = config_get("poll_type", season["poll_type"] or POLL_AP)
 
         try:
             ranked_teams = fetch_rankings(poll_type)
         except Exception as exc:
             await interaction.followup.send(
-                f"Rankings fetch failed: {exc}", ephemeral=True
+                f"❌ Failed to fetch rankings from ESPN: `{exc}`\n"
+                "Try again in a moment.",
+                ephemeral=True,
             )
             return
 
         if not ranked_teams:
             await interaction.followup.send(
-                "Rankings came back empty — ESPN API may be down or the poll "
-                "isn't published yet. Try again or swap to AP.", ephemeral=True
+                "⚠️ ESPN returned no ranked teams for the current poll. "
+                "This can happen during preseason. Try again later or "
+                "check ESPN's rankings page.",
+                ephemeral=True,
             )
             return
 
         try:
-            games = fetch_week_games(start, end, ranked_teams)
+            games = fetch_week_games(
+                start_dt.strftime("%Y%m%d"),
+                end_dt.strftime("%Y%m%d"),
+                ranked_teams,
+            )
         except Exception as exc:
             await interaction.followup.send(
-                f"Schedule fetch failed: {exc}", ephemeral=True
+                f"❌ Failed to fetch schedule from ESPN: `{exc}`", ephemeral=True
             )
             return
 
         if not games:
             await interaction.followup.send(
-                f"No ranked games found for {start}–{end}. "
-                "Check the dates — CFB weeks sometimes start Thursday.", ephemeral=True
+                f"No games involving ranked teams found between "
+                f"`{start_raw}` and `{end_raw}`. Double check the date range.",
+                ephemeral=True,
             )
             return
 
-        # ── Write to DB ──────────────────────────────────────────────────────
         with get_db() as conn:
-            existing = conn.execute(
-                "SELECT id FROM weeks WHERE season_id=? AND week_number=?",
-                (season["id"], week_num)
+            existing_week = conn.execute(
+                "SELECT * FROM weeks WHERE season_id=? AND week_number=?",
+                (season["id"], wk_num)
             ).fetchone()
 
-            if existing:
-                week_id = existing["id"]
-                conn.execute("""
-                    UPDATE weeks
-                    SET start_date=?, end_date=?, game_count=?,
-                        loaded_at=datetime('now','localtime'), is_scored=0
-                    WHERE id=?
-                """, (start, end, len(games), week_id))
+            if existing_week:
+                week_id = existing_week["id"]
+                conn.execute(
+                    """UPDATE weeks SET start_date=?, end_date=?,
+                       game_count=?, loaded_at=datetime('now'), recap_sent=0
+                       WHERE id=?""",
+                    (start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"),
+                     len(games), week_id)
+                )
             else:
-                conn.execute("""
-                    INSERT INTO weeks(season_id, week_number, start_date,
-                                     end_date, game_count, loaded_at)
-                    VALUES (?,?,?,?,?,datetime('now','localtime'))
-                """, (season["id"], week_num, start, end, len(games)))
-                week_id = conn.execute(
-                    "SELECT last_insert_rowid()"
-                ).fetchone()[0]
+                cur = conn.execute(
+                    """INSERT INTO weeks(season_id, week_number, start_date,
+                       end_date, game_count, loaded_at)
+                       VALUES (?,?,?,?,?,datetime('now'))""",
+                    (season["id"], wk_num, start_dt.strftime("%Y-%m-%d"),
+                     end_dt.strftime("%Y-%m-%d"), len(games))
+                )
+                week_id = cur.lastrowid
+
+            # FIX #12: Track which ESPN games are in the new fetch.
+            # Any existing game NOT in the new fetch (and not manually added,
+            # and not already final) gets removed along with its picks/slots —
+            # this handles cancelled/dropped games on reload.
+            new_espn_ids = {g["espn_game_id"] for g in games}
+            stale_games = conn.execute(
+                """SELECT id, espn_game_id, home_team, away_team, status
+                   FROM games
+                   WHERE week_id=? AND is_manually_added=0
+                     AND status != 'final'""",
+                (week_id,)
+            ).fetchall()
+            removed_stale = []
+            for sg in stale_games:
+                if sg["espn_game_id"] not in new_espn_ids:
+                    conn.execute(
+                        "DELETE FROM pick_slots WHERE game_id=?", (sg["id"],)
+                    )
+                    conn.execute(
+                        "DELETE FROM picks WHERE game_id=?", (sg["id"],)
+                    )
+                    conn.execute("DELETE FROM games WHERE id=?", (sg["id"],))
+                    removed_stale.append(f"{sg['home_team']} vs {sg['away_team']}")
 
             for g in games:
                 conn.execute("""
@@ -265,283 +298,447 @@ class LoadWeekModal(discord.ui.Modal, title="Load week"):
                         channel, espn_link, status, home_score, away_score, winner)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(week_id, espn_game_id) DO UPDATE SET
-                        home_rank    = excluded.home_rank,
-                        away_rank    = excluded.away_rank,
-                        spread       = excluded.spread,
-                        over_under   = excluded.over_under,
-                        kickoff_time = excluded.kickoff_time,
-                        channel      = excluded.channel,
-                        status       = excluded.status,
-                        home_score   = excluded.home_score,
-                        away_score   = excluded.away_score,
-                        winner       = excluded.winner
+                        home_rank   = excluded.home_rank,
+                        away_rank   = excluded.away_rank,
+                        spread      = excluded.spread,
+                        over_under  = excluded.over_under,
+                        kickoff_time= excluded.kickoff_time,
+                        channel     = excluded.channel,
+                        status      = excluded.status,
+                        home_score  = excluded.home_score,
+                        away_score  = excluded.away_score,
+                        winner      = excluded.winner
                 """, (
                     week_id, g["espn_game_id"], g["home_team"], g["away_team"],
                     g["home_rank"], g["away_rank"], g["spread"], g["over_under"],
-                    g["kickoff_time"], g["channel"], g["espn_link"],
-                    g["status"], g["home_score"], g["away_score"], g["winner"]
+                    g["kickoff_time"], g["channel"], g["espn_link"], g["status"],
+                    g["home_score"], g["away_score"], g["winner"],
                 ))
 
-        # ── Post embeds & refresh panels ────────────────────────────────────
-        await post_game_embeds(self.bot, week_id)
-        await _refresh_all_panels(self.bot)
+            # game_count = total games (existing manual + newly fetched)
+            total_count = conn.execute(
+                "SELECT COUNT(*) as c FROM games WHERE week_id=?", (week_id,)
+            ).fetchone()["c"]
+            conn.execute(
+                "UPDATE weeks SET game_count=? WHERE id=?",
+                (total_count, week_id)
+            )
 
-        # ── Notify all players that picks are open ───────────────────────────
-        from cogs.notifications import notify_week_open
-        await notify_week_open(self.bot, week_id, week_num, len(games))
+            week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
 
-        await _log(
-            self.bot,
-            f"Week {week_num} loaded — **{len(games)} games** · "
-            f"Dates: {start}–{end} · Poll: {poll_type.upper()}",
-            title="Week loaded", level="success",
+        await post_game_embeds(interaction.client, dict(week))
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(interaction.client)
+
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(interaction.client)
+
+        result_msg = (
+            f"✅ **Week {wk_num}** loaded with **{len(games)}** ranked games "
+            f"(`{start_raw}` → `{end_raw}`)."
         )
-        await interaction.followup.send(
-            f"✅ Week {week_num} loaded — {len(games)} games posted to #cfcp-games.",
+        if removed_stale:
+            result_msg += (
+                f"\n\n⚠️ Removed **{len(removed_stale)}** game(s) no longer "
+                f"in ESPN's schedule for this week: "
+                + ", ".join(removed_stale)
+            )
+        await interaction.followup.send(result_msg, ephemeral=True)
+
+        await log_to_channel(
+            interaction.client,
+            f"**Week {wk_num}** loaded by {interaction.user.mention} — "
+            f"{len(games)} games" +
+            (f", {len(removed_stale)} stale game(s) removed" if removed_stale else ""),
+            title="Week loaded",
+            level="success",
+        )
+
+
+# ── Add Manual Game flow ────────────────────────────────────────────────────────
+
+class AddManualGameModal(discord.ui.Modal, title="Add a game manually"):
+    home_team = discord.ui.TextInput(label="Home team", max_length=64)
+    away_team = discord.ui.TextInput(label="Away team", max_length=64)
+    home_rank = discord.ui.TextInput(
+        label="Home rank (blank if unranked)", required=False, max_length=2
+    )
+    away_rank = discord.ui.TextInput(
+        label="Away rank (blank if unranked)", required=False, max_length=2
+    )
+    kickoff = discord.ui.TextInput(
+        label="Kickoff (YYYY-MM-DD HH:MM, 24h, ET)",
+        placeholder="e.g. 2026-09-06 19:30",
+        max_length=16,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        season, week = resolve_latest_week()
+        if not week:
+            await interaction.response.send_message(
+                "No week loaded — load a week first.", ephemeral=True
+            )
+            return
+
+        try:
+            kickoff_dt = datetime.strptime(
+                self.kickoff.value.strip(), "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=ET)
+        except ValueError:
+            await interaction.response.send_message(
+                "Kickoff must be in `YYYY-MM-DD HH:MM` format (24-hour, ET).",
+                ephemeral=True,
+            )
+            return
+
+        def _parse_rank(v: str) -> Optional[int]:
+            v = v.strip()
+            if not v:
+                return None
+            try:
+                r = int(v)
+                return r if 1 <= r <= 25 else None
+            except ValueError:
+                return None
+
+        home_rank = _parse_rank(self.home_rank.value)
+        away_rank = _parse_rank(self.away_rank.value)
+
+        # Manual games get a unique synthetic espn_game_id
+        manual_id = f"manual_{week['id']}_{int(now_et().timestamp())}"
+
+        with get_db() as conn:
+            conn.execute("""
+                INSERT INTO games(week_id, espn_game_id, home_team, away_team,
+                    home_rank, away_rank, kickoff_time, status, is_manually_added)
+                VALUES (?,?,?,?,?,?,?, 'scheduled', 1)
+            """, (
+                week["id"], manual_id,
+                self.home_team.value.strip(), self.away_team.value.strip(),
+                home_rank, away_rank, kickoff_dt.isoformat(),
+            ))
+            new_game_id = conn.execute(
+                "SELECT id FROM games WHERE espn_game_id=?", (manual_id,)
+            ).fetchone()["id"]
+
+            conn.execute(
+                "UPDATE weeks SET game_count = game_count + 1 WHERE id=?",
+                (week["id"],)
+            )
+            week = conn.execute("SELECT * FROM weeks WHERE id=?", (week["id"],)).fetchone()
+            game = conn.execute("SELECT * FROM games WHERE id=?", (new_game_id,)).fetchone()
+
+        ch_id = config_get("channel_games")
+        if ch_id:
+            ch = interaction.client.get_channel(int(ch_id))
+            if isinstance(ch, discord.TextChannel):
+                player_picks  = _get_player_picks_for_game(game["id"])
+                picks_reveal  = config_get("picks_reveal", "1") == "1"
+                total_players = _get_total_active_players()
+                embed = game_embed(
+                    dict(game), player_picks=player_picks,
+                    picks_reveal=picks_reveal, total_players=total_players,
+                )
+                msg = await ch.send(embed=embed)
+                with get_db() as conn:
+                    conn.execute(
+                        "UPDATE games SET discord_message_id=? WHERE id=?",
+                        (str(msg.id), game["id"])
+                    )
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(interaction.client)
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(interaction.client)
+
+        await interaction.response.send_message(
+            f"✅ Added **{self.home_team.value} vs {self.away_team.value}** "
+            f"to Week {week['week_number']}.\n\n"
+            f"⚠️ **Note:** Manual games don't auto-score from ESPN. "
+            f"You'll need to use **Set results** to enter the final score "
+            f"once this game finishes.",
             ephemeral=True,
         )
 
+        await log_to_channel(
+            interaction.client,
+            f"Manual game added by {interaction.user.mention}: "
+            f"**{self.home_team.value} vs {self.away_team.value}** "
+            f"(Week {week['week_number']})",
+            title="Manual game added",
+        )
 
-class EditGameModal(discord.ui.Modal, title="Edit game"):
-    home_rank = discord.ui.TextInput(
-        label="Home rank (number, or blank = NR)",
-        required=False, max_length=3, placeholder="e.g. 5"
-    )
-    away_rank = discord.ui.TextInput(
-        label="Away rank (number, or blank = NR)",
-        required=False, max_length=3, placeholder="e.g. 12"
-    )
-    kickoff = discord.ui.TextInput(
-        label="Kickoff time (YYYY-MM-DD HH:MM ET)",
-        required=False, max_length=20, placeholder="e.g. 2026-09-05 12:00"
-    )
-    spread = discord.ui.TextInput(
-        label="Spread", required=False,
-        max_length=30, placeholder="e.g. OHIO -14.5"
-    )
-    channel = discord.ui.TextInput(
-        label="Broadcast channel", required=False,
-        max_length=30, placeholder="e.g. ESPN"
-    )
+
+class RemoveGameSelectView(discord.ui.View):
+    """FIX #12 follow-up: lets an admin remove a specific game (e.g. a stale
+    manual game or a duplicate created by an ESPN ID change)."""
+    def __init__(self, bot: commands.Bot, week: dict, games: list):
+        super().__init__(timeout=120)
+        self.bot  = bot
+        self.week = week
+
+        options = []
+        for g in games[:25]:
+            hr = f"#{g['home_rank']} " if g["home_rank"] else ""
+            ar = f"#{g['away_rank']} " if g["away_rank"] else ""
+            tag = " (manual)" if g["is_manually_added"] else ""
+            options.append(discord.SelectOption(
+                label=f"{hr}{g['home_team']} vs {ar}{g['away_team']}{tag}"[:100],
+                value=str(g["id"]),
+                description=g["status"],
+            ))
+
+        select = discord.ui.Select(
+            placeholder="Select a game to remove…", options=options
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        game_id = int(interaction.data["values"][0])  # type: ignore
+        with get_db() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+            if not game:
+                await interaction.response.send_message("Game not found.", ephemeral=True)
+                return
+
+            has_picks = conn.execute(
+                "SELECT COUNT(*) as c FROM picks WHERE game_id=?", (game_id,)
+            ).fetchone()["c"]
+
+            conn.execute("DELETE FROM pick_slots WHERE game_id=?", (game_id,))
+            conn.execute("DELETE FROM picks WHERE game_id=?", (game_id,))
+            conn.execute("DELETE FROM games WHERE id=?", (game_id,))
+            conn.execute(
+                "UPDATE weeks SET game_count = game_count - 1 WHERE id=?",
+                (self.week["id"],)
+            )
+
+        ch_id = config_get("channel_games")
+        if ch_id and game["discord_message_id"]:
+            ch = interaction.client.get_channel(int(ch_id))
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    msg = await ch.fetch_message(int(game["discord_message_id"]))
+                    await msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(interaction.client)
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(interaction.client)
+
+        warn = (
+            f"\n⚠️ This game had **{has_picks}** pick(s) on it — those picks "
+            "were deleted. Affected players will need to re-pick if slots remain open."
+            if has_picks else ""
+        )
+        await interaction.response.edit_message(
+            content=(
+                f"🗑️ Removed **{game['home_team']} vs {game['away_team']}** "
+                f"from Week {self.week['week_number']}.{warn}"
+            ),
+            view=None,
+        )
+
+        await log_to_channel(
+            interaction.client,
+            f"Game removed by {interaction.user.mention}: "
+            f"**{game['home_team']} vs {game['away_team']}**"
+            + (f" ({has_picks} pick(s) deleted)" if has_picks else ""),
+            title="Game removed", level="warning",
+        )
+
+
+# ── Set Results flow (FIX #18) ──────────────────────────────────────────────────
+
+class SetResultsGameSelectView(discord.ui.View):
+    """FIX #18: 'Set results' now opens a real flow — pick an unfinished
+    game and enter a final score. This is primarily for manual games
+    that never auto-score, but works for any game."""
+    def __init__(self, bot: commands.Bot, week: dict, games: list):
+        super().__init__(timeout=180)
+        self.bot  = bot
+        self.week = week
+
+        options = []
+        for g in games[:25]:
+            hr  = f"#{g['home_rank']} " if g["home_rank"] else ""
+            ar  = f"#{g['away_rank']} " if g["away_rank"] else ""
+            tag = " (manual)" if g["is_manually_added"] else ""
+            cur = (
+                f"current: {g['home_score']}-{g['away_score']}"
+                if g["home_score"] is not None else g["status"]
+            )
+            options.append(discord.SelectOption(
+                label=f"{hr}{g['home_team']} vs {ar}{g['away_team']}{tag}"[:100],
+                value=str(g["id"]),
+                description=cur[:100],
+            ))
+
+        if not options:
+            self.add_item(discord.ui.Button(
+                label="No games to score", disabled=True,
+                style=discord.ButtonStyle.secondary,
+            ))
+            return
+
+        select = discord.ui.Select(
+            placeholder="Select a game to enter results for…", options=options
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        game_id = int(interaction.data["values"][0])  # type: ignore
+        with get_db() as conn:
+            game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+        if not game:
+            await interaction.response.send_message("Game not found.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SetResultModal(self.bot, dict(game)))
+
+
+class SetResultModal(discord.ui.Modal, title="Enter final score"):
+    home_score = discord.ui.TextInput(label="Home score", max_length=3)
+    away_score = discord.ui.TextInput(label="Away score", max_length=3)
 
     def __init__(self, bot: commands.Bot, game: dict):
         super().__init__()
         self.bot  = bot
         self.game = game
+        self.title = (
+            f"{game['home_team']} vs {game['away_team']}"
+        )[:45]
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        updates: dict = {}
-
-        # Home rank — blank string means "set to NR (NULL)"
-        hr = self.home_rank.value.strip()
-        if hr:
-            try:
-                updates["home_rank"] = int(hr)
-            except ValueError:
-                await interaction.followup.send(
-                    "Home rank must be a number.", ephemeral=True
-                )
-                return
-        elif self.home_rank.value != "":
-            updates["home_rank"] = None
-
-        # Away rank
-        ar = self.away_rank.value.strip()
-        if ar:
-            try:
-                updates["away_rank"] = int(ar)
-            except ValueError:
-                await interaction.followup.send(
-                    "Away rank must be a number.", ephemeral=True
-                )
-                return
-        elif self.away_rank.value != "":
-            updates["away_rank"] = None
-
-        # Kickoff
-        k = self.kickoff.value.strip()
-        if k:
-            try:
-                dt = datetime.strptime(k, "%Y-%m-%d %H:%M").replace(tzinfo=ET)
-                updates["kickoff_time"] = dt.isoformat()
-            except ValueError:
-                await interaction.followup.send(
-                    "Invalid kickoff — use YYYY-MM-DD HH:MM.", ephemeral=True
-                )
-                return
-
-        if self.spread.value.strip():
-            updates["spread"] = self.spread.value.strip()
-        if self.channel.value.strip():
-            updates["channel"] = self.channel.value.strip()
-
-        if not updates:
-            await interaction.followup.send("No changes submitted.", ephemeral=True)
+        try:
+            h = int(self.home_score.value.strip())
+            a = int(self.away_score.value.strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "Scores must be whole numbers.", ephemeral=True
+            )
+            return
+        if h < 0 or a < 0:
+            await interaction.response.send_message(
+                "Scores can't be negative.", ephemeral=True
+            )
             return
 
-        set_clause = ", ".join(f"{k}=?" for k in updates)
+        # FIX #9: tie handling on manual entry too
+        if h > a:
+            winner = self.game["home_team"]
+        elif a > h:
+            winner = self.game["away_team"]
+        else:
+            winner = None
+
         with get_db() as conn:
             conn.execute(
-                f"UPDATE games SET {set_clause} WHERE id=?",
-                list(updates.values()) + [self.game["id"]]
+                """UPDATE games SET home_score=?, away_score=?, winner=?,
+                   status='final' WHERE id=?""",
+                (h, a, winner, self.game["id"])
             )
 
         await update_single_game_embed(self.bot, self.game["id"])
-        await _log(
+
+        from cogs.scoring import score_single_game
+        await score_single_game(self.bot, self.game["id"])
+
+        tie_note = " *(tie — no winner credited)*" if winner is None else ""
+        await interaction.response.send_message(
+            f"✅ **{self.game['home_team']} {h} — {a} {self.game['away_team']}** "
+            f"recorded and scored.{tie_note}",
+            ephemeral=True,
+        )
+
+        await log_to_channel(
             self.bot,
-            f"Game edited: **{self.game['home_team']} vs {self.game['away_team']}** "
-            f"— updated: {', '.join(updates.keys())}",
-            title="Game edited",
-        )
-        await interaction.followup.send("✅ Game updated.", ephemeral=True)
-
-
-class AddGameModal(discord.ui.Modal, title="Add game manually"):
-    home_team = discord.ui.TextInput(
-        label="Home team name", max_length=50, placeholder="e.g. Ohio State"
-    )
-    away_team = discord.ui.TextInput(
-        label="Away team name", max_length=50, placeholder="e.g. Michigan"
-    )
-    kickoff = discord.ui.TextInput(
-        label="Kickoff time (YYYY-MM-DD HH:MM ET)",
-        max_length=20, placeholder="e.g. 2026-09-05 12:00"
-    )
-    spread = discord.ui.TextInput(
-        label="Spread (optional)", required=False,
-        max_length=30, placeholder="e.g. OSU -7.5"
-    )
-    channel = discord.ui.TextInput(
-        label="Channel (optional)", required=False,
-        max_length=30, placeholder="e.g. FOX"
-    )
-
-    def __init__(self, bot: commands.Bot):
-        super().__init__()
-        self.bot = bot
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-        season = get_active_season()
-        if not season:
-            await interaction.followup.send("No active season.", ephemeral=True)
-            return
-
-        week = _latest_week(season["id"])
-        if not week:
-            await interaction.followup.send(
-                "No week loaded yet — load a week first.", ephemeral=True
-            )
-            return
-
-        k = self.kickoff.value.strip()
-        try:
-            dt = datetime.strptime(k, "%Y-%m-%d %H:%M").replace(tzinfo=ET)
-            kickoff_iso = dt.isoformat()
-        except ValueError:
-            await interaction.followup.send(
-                "Invalid kickoff — use YYYY-MM-DD HH:MM.", ephemeral=True
-            )
-            return
-
-        home    = self.home_team.value.strip()
-        away    = self.away_team.value.strip()
-        spread  = self.spread.value.strip()
-        channel = self.channel.value.strip()
-        manual_id = f"manual_{int(datetime.now().timestamp())}"
-
-        with get_db() as conn:
-            conn.execute("""
-                INSERT INTO games(week_id, espn_game_id, home_team, away_team,
-                    kickoff_time, spread, channel, status, is_manually_added)
-                VALUES (?,?,?,?,?,?,?,'scheduled',1)
-            """, (week["id"], manual_id, home, away, kickoff_iso, spread, channel))
-            conn.execute(
-                "UPDATE weeks SET game_count = game_count + 1 WHERE id=?",
-                (week["id"],)
-            )
-
-        await post_game_embeds(self.bot, week["id"])
-        await _refresh_all_panels(self.bot)
-
-        await _log(
-            self.bot,
-            f"Manual game added: **{home} vs {away}** · {kickoff_iso}",
-            title="Game added manually",
-        )
-        await interaction.followup.send(
-            f"✅ Manual game added: {home} vs {away}.", ephemeral=True
+            f"Manual result entered by {interaction.user.mention}: "
+            f"**{self.game['home_team']} {h} — {a} {self.game['away_team']}**"
+            f"{tie_note}",
+            title="Result entered",
         )
 
 
-# ── Edit game select flow ──────────────────────────────────────────────────────
+# ── End Season flow (FIX #21) ──────────────────────────────────────────────────
 
-class EditGameSelectMenu(discord.ui.Select):
-    def __init__(self, games: list, bot: commands.Bot):
-        self.bot = bot
-        options = [
-            discord.SelectOption(
-                label=f"{g['home_team']} vs {g['away_team']}"[:100],
-                value=str(g["id"]),
-                description=(
-                    format_time_et(
-                        datetime.fromisoformat(g["kickoff_time"]),
-                        include_date=True
-                    )[:100]
-                    if g.get("kickoff_time") else ""
-                ),
-            )
-            for g in games[:25]
-        ]
-        super().__init__(placeholder="Select a game to edit…", options=options)
+class EndSeasonConfirmView(discord.ui.View):
+    """FIX #21: Provides an actual season-end flow — exports final standings,
+    announces the champion, and marks the season inactive so a new one
+    can be started cleanly."""
+    def __init__(self, bot: commands.Bot, season: dict):
+        super().__init__(timeout=120)
+        self.bot    = bot
+        self.season = season
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        game_id = int(self.values[0])
-        with get_db() as conn:
-            game = conn.execute(
-                "SELECT * FROM games WHERE id=?", (game_id,)
-            ).fetchone()
-        if not game:
-            await interaction.response.send_message("Game not found.", ephemeral=True)
-            return
-        await interaction.response.send_modal(
-            EditGameModal(self.bot, dict(game))
-        )
-
-
-class EditGameSelectView(discord.ui.View):
-    def __init__(self, games: list, bot: commands.Bot):
-        super().__init__(timeout=60)
-        self.add_item(EditGameSelectMenu(games, bot))
-
-
-# ── Lock confirmation ──────────────────────────────────────────────────────────
-
-class LockConfirmView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, week_id: int, week_num: int):
-        super().__init__(timeout=30)
-        self.bot      = bot
-        self.week_id  = week_id
-        self.week_num = week_num
-
-    @discord.ui.button(label="Confirm lock", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Yes, end the season", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction,
                       button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True)
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE weeks SET is_locked=1 WHERE id=?", (self.week_id,)
-            )
-        await _refresh_all_panels(self.bot)
-        await _log(
-            self.bot,
-            f"Week {self.week_num} picks locked — no further submissions accepted.",
-            title="Picks locked", level="warning",
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        from database import get_season_leaderboard
+        from utils.embeds import standings_season_embed
+
+        rows = get_season_leaderboard(self.season["id"])
+
+        # Export to CSV
+        import csv, io
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "rank", "display_name", "status", "total_points", "total_correct",
+            "total_wrong", "total_forfeits", "total_possible", "weeks_played",
+            "best_week"
+        ])
+        for i, r in enumerate(rows, start=1):
+            writer.writerow([
+                i, r["display_name"], r["status"], r["total_points"],
+                r["total_correct"], r["total_wrong"], r["total_forfeits"],
+                r["total_possible"], r["weeks_played"], r["best_week"]
+            ])
+        buf.seek(0)
+        file = discord.File(
+            io.BytesIO(buf.getvalue().encode("utf-8")),
+            filename=f"cfcp_{self.season['year']}_final_standings.csv",
         )
+
+        embed = standings_season_embed(rows, self.season["year"])
+        embed.title = f"🏆  {self.season['year']} Final Standings — Season Complete!"
+
+        if rows:
+            champ = rows[0]
+            embed.add_field(
+                name="🎉 Champion",
+                value=f"**{champ['display_name']}** with {champ['total_points']} points!",
+                inline=False,
+            )
+
+        std_ch_id = config_get("channel_standings")
+        if std_ch_id:
+            ch = self.bot.get_channel(int(std_ch_id))
+            if isinstance(ch, discord.TextChannel):
+                await ch.send(embed=embed, file=file)
+
+        end_active_season()
+
         await interaction.followup.send(
-            f"🔒 Week {self.week_num} picks are now locked.", ephemeral=True
+            f"🏁 **{self.season['year']} season ended.** Final standings posted "
+            f"to the standings channel. Use **Load week** with a new week number "
+            f"to start a fresh season — you'll be prompted to confirm the new year.",
+            ephemeral=True,
+        )
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(self.bot)
+
+        await log_to_channel(
+            self.bot,
+            f"**{self.season['year']} season ended** by {interaction.user.mention}.",
+            title="Season ended", level="success",
         )
         self.stop()
 
@@ -552,13 +749,157 @@ class LockConfirmView(discord.ui.View):
         self.stop()
 
 
-# ── Admin panel view ───────────────────────────────────────────────────────────
+# ── Player management ────────────────────────────────────────────────────────
+
+class PlayerManageSelectView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, players: list):
+        super().__init__(timeout=120)
+        self.bot = bot
+
+        options = [
+            discord.SelectOption(
+                label=f"{p['display_name']} ({p['status']})"[:100],
+                value=str(p["id"]),
+            )
+            for p in players[:25]
+        ]
+        if not options:
+            self.add_item(discord.ui.Button(
+                label="No players found", disabled=True,
+                style=discord.ButtonStyle.secondary,
+            ))
+            return
+
+        select = discord.ui.Select(
+            placeholder="Select a player…", options=options
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        player_id = int(interaction.data["values"][0])  # type: ignore
+        with get_db() as conn:
+            player = conn.execute(
+                "SELECT * FROM players WHERE id=?", (player_id,)
+            ).fetchone()
+        if not player:
+            await interaction.response.send_message("Player not found.", ephemeral=True)
+            return
+        view = PlayerActionView(self.bot, dict(player))
+        await interaction.response.edit_message(
+            content=(
+                f"**{player['display_name']}**  "
+                f"(`{player['discord_username']}`)\n"
+                f"Status: `{player['status']}`  ·  "
+                f"DMs: {'on' if player['dm_notifications'] else 'off'}"
+            ),
+            view=view,
+        )
+
+
+class PlayerActionView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, player: dict):
+        super().__init__(timeout=120)
+        self.bot    = bot
+        self.player = player
+
+        if player["status"] != "withdrawn":
+            withdraw_btn = discord.ui.Button(
+                label="Withdraw player", style=discord.ButtonStyle.danger
+            )
+            withdraw_btn.callback = self._withdraw
+            self.add_item(withdraw_btn)
+        else:
+            reactivate_btn = discord.ui.Button(
+                label="Re-activate player", style=discord.ButtonStyle.success
+            )
+            reactivate_btn.callback = self._reactivate
+            self.add_item(reactivate_btn)
+
+        rename_btn = discord.ui.Button(
+            label="Rename", style=discord.ButtonStyle.secondary
+        )
+        rename_btn.callback = self._rename
+        self.add_item(rename_btn)
+
+    async def _withdraw(self, interaction: discord.Interaction) -> None:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE players SET status='withdrawn', dm_notifications=0 WHERE id=?",
+                (self.player["id"],)
+            )
+        await interaction.response.edit_message(
+            content=f"**{self.player['display_name']}** withdrawn.", view=None
+        )
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(self.bot)
+        await log_to_channel(
+            self.bot,
+            f"**{self.player['display_name']}** withdrawn by "
+            f"{interaction.user.mention}.",
+            title="Player withdrawn", level="warning",
+        )
+
+    async def _reactivate(self, interaction: discord.Interaction) -> None:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE players SET status='active', dm_notifications=1 WHERE id=?",
+                (self.player["id"],)
+            )
+        await interaction.response.edit_message(
+            content=f"**{self.player['display_name']}** re-activated.", view=None
+        )
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(self.bot)
+        await log_to_channel(
+            self.bot,
+            f"**{self.player['display_name']}** re-activated by "
+            f"{interaction.user.mention}.",
+            title="Player re-activated", level="success",
+        )
+
+    async def _rename(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(RenamePlayerModal(self.bot, self.player))
+
+
+class RenamePlayerModal(discord.ui.Modal, title="Rename player"):
+    new_name = discord.ui.TextInput(label="New display name", max_length=32)
+
+    def __init__(self, bot: commands.Bot, player: dict):
+        super().__init__()
+        self.bot    = bot
+        self.player = player
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        new = self.new_name.value.strip()
+        with get_db() as conn:
+            taken = conn.execute(
+                "SELECT id FROM players WHERE LOWER(display_name)=LOWER(?) AND id!=?",
+                (new, self.player["id"])
+            ).fetchone()
+        if taken:
+            await interaction.response.send_message(
+                f"`{new}` is already in use by another player.", ephemeral=True
+            )
+            return
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE players SET display_name=? WHERE id=?",
+                (new, self.player["id"])
+            )
+        await interaction.response.send_message(
+            f"Renamed **{self.player['display_name']}** → **{new}**.", ephemeral=True
+        )
+        from cogs.picks import _refresh_picks_hub
+        await _refresh_picks_hub(self.bot)
+
+
+# ── Admin panel view ─────────────────────────────────────────────────────────
 
 class AdminPanelView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    # ── Row 0: Week management ───────────────────────────────────────────────
     @discord.ui.button(label="Load week", style=discord.ButtonStyle.primary,
                        custom_id="admin:load_week", row=0)
     async def load_week(self, interaction: discord.Interaction,
@@ -566,83 +907,35 @@ class AdminPanelView(discord.ui.View):
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        await interaction.response.send_modal(LoadWeekModal(interaction.client))
+        await interaction.response.send_modal(LoadWeekModal())
 
-    @discord.ui.button(label="Lock picks", style=discord.ButtonStyle.danger,
-                       custom_id="admin:lock_picks", row=0)
-    async def lock_picks(self, interaction: discord.Interaction,
-                         button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Add manual game", style=discord.ButtonStyle.secondary,
+                       custom_id="admin:add_game", row=0)
+    async def add_manual_game(self, interaction: discord.Interaction,
+                              button: discord.ui.Button) -> None:
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        season = get_active_season()
-        if not season:
-            await interaction.response.send_message("No active season.", ephemeral=True)
+        season, week = resolve_latest_week()
+        if not week:
+            await interaction.response.send_message(
+                "No week loaded — load a week first.", ephemeral=True
+            )
             return
-        week = _latest_week(season["id"])
+        await interaction.response.send_modal(AddManualGameModal())
+
+    @discord.ui.button(label="Remove game", style=discord.ButtonStyle.secondary,
+                       custom_id="admin:remove_game", row=0)
+    async def remove_game(self, interaction: discord.Interaction,
+                          button: discord.ui.Button) -> None:
+        if not is_admin(interaction):
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        season, week = resolve_latest_week()
         if not week:
             await interaction.response.send_message(
                 "No week loaded.", ephemeral=True
             )
-            return
-        if week["is_locked"]:
-            await interaction.response.send_message(
-                f"Week {week['week_number']} is already locked.", ephemeral=True
-            )
-            return
-        view = LockConfirmView(
-            interaction.client, week["id"], week["week_number"]
-        )
-        await interaction.response.send_message(
-            f"⚠️ Lock all picks for **Week {week['week_number']}**? "
-            "Players will not be able to submit or edit after this.",
-            view=view, ephemeral=True,
-        )
-
-    @discord.ui.button(label="Unlock picks", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:unlock_picks", row=0)
-    async def unlock_picks(self, interaction: discord.Interaction,
-                           button: discord.ui.Button) -> None:
-        if not is_admin(interaction):
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        season = get_active_season()
-        if not season:
-            await interaction.response.send_message("No active season.", ephemeral=True)
-            return
-        week = _latest_week(season["id"])
-        if not week:
-            await interaction.response.send_message("No week loaded.", ephemeral=True)
-            return
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE weeks SET is_locked=0 WHERE id=?", (week["id"],)
-            )
-        await _refresh_all_panels(interaction.client)
-        await _log(
-            interaction.client,
-            f"Week {week['week_number']} picks **unlocked** (emergency override).",
-            title="Picks unlocked", level="warning",
-        )
-        await interaction.response.send_message(
-            f"🔓 Week {week['week_number']} picks unlocked.", ephemeral=True
-        )
-
-    # ── Row 1: Game management ───────────────────────────────────────────────
-    @discord.ui.button(label="Edit game", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:edit_game", row=1)
-    async def edit_game(self, interaction: discord.Interaction,
-                        button: discord.ui.Button) -> None:
-        if not is_admin(interaction):
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        season = get_active_season()
-        if not season:
-            await interaction.response.send_message("No active season.", ephemeral=True)
-            return
-        week = _latest_week(season["id"])
-        if not week:
-            await interaction.response.send_message("No week loaded.", ephemeral=True)
             return
         with get_db() as conn:
             games = conn.execute(
@@ -651,24 +944,15 @@ class AdminPanelView(discord.ui.View):
             ).fetchall()
         if not games:
             await interaction.response.send_message(
-                "No games this week.", ephemeral=True
+                "No games to remove this week.", ephemeral=True
             )
             return
-        view = EditGameSelectView([dict(g) for g in games], interaction.client)
+        view = RemoveGameSelectView(interaction.client, dict(week), [dict(g) for g in games])
         await interaction.response.send_message(
-            f"**Week {week['week_number']} — select a game to edit:**",
-            view=view, ephemeral=True,
+            "Select a game to remove:", view=view, ephemeral=True
         )
 
-    @discord.ui.button(label="Add game", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:add_game", row=1)
-    async def add_game(self, interaction: discord.Interaction,
-                       button: discord.ui.Button) -> None:
-        if not is_admin(interaction):
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        await interaction.response.send_modal(AddGameModal(interaction.client))
-
+    # FIX #18: Set results is now a real flow, not a Milestone-4 stub
     @discord.ui.button(label="Set results", style=discord.ButtonStyle.secondary,
                        custom_id="admin:set_results", row=1)
     async def set_results(self, interaction: discord.Interaction,
@@ -676,41 +960,78 @@ class AdminPanelView(discord.ui.View):
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
+        season, week = resolve_latest_week()
+        if not week:
+            await interaction.response.send_message(
+                "No week loaded.", ephemeral=True
+            )
+            return
+        with get_db() as conn:
+            games = conn.execute(
+                """SELECT * FROM games WHERE week_id=? AND status != 'final'
+                   ORDER BY kickoff_time""",
+                (week["id"],)
+            ).fetchall()
+        if not games:
+            await interaction.response.send_message(
+                "All games for the current week are already final. "
+                "If you need to *correct* a final score, use **Force re-fetch** "
+                "first to reset, or contact a developer for a manual DB fix.",
+                ephemeral=True,
+            )
+            return
+        view = SetResultsGameSelectView(interaction.client, dict(week), [dict(g) for g in games])
         await interaction.response.send_message(
-            "Result entry is coming in Milestone 4 (auto-scoring).", ephemeral=True
+            "Select a game to enter a final score for:", view=view, ephemeral=True
         )
 
-    # ── Row 2: Settings ──────────────────────────────────────────────────────
-    @discord.ui.button(label="Swap poll", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:swap_poll", row=2)
-    async def swap_poll(self, interaction: discord.Interaction,
-                        button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Force re-fetch scores", style=discord.ButtonStyle.secondary,
+                       custom_id="admin:refetch", row=1)
+    async def refetch(self, interaction: discord.Interaction,
+                      button: discord.ui.Button) -> None:
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        current  = config_get("active_poll", POLL_AP)
-        new_poll = POLL_CFP if current == POLL_AP else POLL_AP
-        config_set("active_poll", new_poll)
-        label = "CFP Rankings" if new_poll == POLL_CFP else "AP Top 25"
-        season = get_active_season()
-        if season:
+        season, week = resolve_latest_week()
+        if not week:
+            await interaction.response.send_message("No week loaded.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        from utils.espn import fetch_game_status
+        with get_db() as conn:
+            games = conn.execute(
+                """SELECT * FROM games WHERE week_id=?
+                   AND is_manually_added=0""",
+                (week["id"],)
+            ).fetchall()
+
+        updated = 0
+        for game in games:
+            result = fetch_game_status(game["espn_game_id"])
+            if not result:
+                continue
             with get_db() as conn:
                 conn.execute(
-                    "UPDATE seasons SET poll_type=? WHERE id=?",
-                    (new_poll, season["id"])
+                    """UPDATE games SET status=?, home_score=?, away_score=?,
+                       winner=? WHERE id=?""",
+                    (result["status"], result["home_score"], result["away_score"],
+                     result["winner"], game["id"])
                 )
-        await _refresh_all_panels(interaction.client)
-        await _log(
-            interaction.client,
-            f"Poll switched to **{label}**.",
-            title="Poll changed",
-        )
-        await interaction.response.send_message(
-            f"✅ Active poll switched to **{label}**.", ephemeral=True
+            await update_single_game_embed(interaction.client, game["id"])
+            updated += 1
+
+        from cogs.scoring import recalculate_weekly_scores
+        await recalculate_weekly_scores(interaction.client, week["id"])
+
+        await interaction.followup.send(
+            f"🔄 Re-fetched and updated **{updated}** game(s), and recalculated scores.",
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Toggle pick reveal", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:toggle_reveal", row=2)
+                       custom_id="admin:toggle_reveal", row=1)
     async def toggle_reveal(self, interaction: discord.Interaction,
                             button: discord.ui.Button) -> None:
         if not is_admin(interaction):
@@ -719,210 +1040,84 @@ class AdminPanelView(discord.ui.View):
         current = config_get("picks_reveal", "1")
         new_val = "0" if current == "1" else "1"
         config_set("picks_reveal", new_val)
-        state = "ON" if new_val == "1" else "OFF"
-        await _refresh_all_panels(interaction.client)
-        await _log(
-            interaction.client,
-            f"Pick reveal toggled **{state}** — "
-            "game embeds will {'show' if new_val=='1' else 'hide'} individual picks after lock.",
-            title="Pick reveal changed",
-        )
+
+        season, week = resolve_latest_week()
+        if week:
+            await update_all_game_embeds(interaction.client, week["id"])
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(interaction.client)
+
         await interaction.response.send_message(
-            f"Pick reveal is now **{state}**.", ephemeral=True
+            f"Pick reveal is now **{'ON' if new_val == '1' else 'OFF'}**.",
+            ephemeral=True,
         )
 
-    # ── Row 3: Tools ─────────────────────────────────────────────────────────
-    @discord.ui.button(label="Fix score", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:fix_score", row=3)
-    async def fix_score(self, interaction: discord.Interaction,
-                        button: discord.ui.Button) -> None:
-        if not is_admin(interaction):
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        from cogs.scoring import open_score_fix
-        await open_score_fix(interaction, interaction.client)
-
-    @discord.ui.button(label="Pending approvals", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:approvals", row=3)
-    async def approvals(self, interaction: discord.Interaction,
-                        button: discord.ui.Button) -> None:
-        if not is_admin(interaction):
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-
-        with get_db() as conn:
-            pending = conn.execute(
-                """SELECT rr.id, rr.discord_id, rr.discord_username,
-                          rr.display_name, rr.requested_at
-                   FROM registration_requests rr
-                   WHERE rr.status = 'pending'
-                   ORDER BY rr.requested_at ASC"""
-            ).fetchall()
-
-        if not pending:
-            await interaction.response.send_message(
-                "No pending registration requests.", ephemeral=True
-            )
-            return
-
-        embed = discord.Embed(
-            title=f"Pending registrations ({len(pending)})",
-            color=0x7C3AED,
-        )
-        lines = []
-        for r in pending:
-            lines.append(
-                f"**{r['display_name']}** · `{r['discord_username']}` · "
-                f"<@{r['discord_id']}> · requested {r['requested_at'][:16]}"
-            )
-        embed.description = "\n".join(lines)
-        embed.set_footer(
-            text="Approve or deny each request using the buttons in #cfcp-logs."
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Export week", style=discord.ButtonStyle.secondary,
-                       custom_id="admin:export_week", row=3)
-    async def export_week(self, interaction: discord.Interaction,
+    @discord.ui.button(label="Switch poll (AP/CFP)", style=discord.ButtonStyle.secondary,
+                       custom_id="admin:switch_poll", row=2)
+    async def switch_poll(self, interaction: discord.Interaction,
                           button: discord.ui.Button) -> None:
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        from cogs.stats import export_week
-        await export_week(interaction, interaction.client)
+        current = config_get("poll_type", POLL_AP)
+        new_val = POLL_CFP if current == POLL_AP else POLL_AP
+        config_set("poll_type", new_val)
 
-    # ── Row 4: Player management ─────────────────────────────────────────────
-    @discord.ui.button(label="Remove player", style=discord.ButtonStyle.danger,
-                       custom_id="admin:remove_player", row=4)
-    async def remove_player(self, interaction: discord.Interaction,
-                            button: discord.ui.Button) -> None:
+        season = get_active_season()
+        if season:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE seasons SET poll_type=? WHERE id=?",
+                    (new_val, season["id"])
+                )
+
+        from cogs.setup import refresh_admin_panel
+        await refresh_admin_panel(interaction.client)
+
+        label = "CFP Rankings" if new_val == POLL_CFP else "AP Top 25"
+        await interaction.response.send_message(
+            f"Active poll switched to **{label}**. "
+            f"This takes effect on the next **Load week**.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Manage players", style=discord.ButtonStyle.secondary,
+                       custom_id="admin:manage_players", row=2)
+    async def manage_players(self, interaction: discord.Interaction,
+                             button: discord.ui.Button) -> None:
         if not is_admin(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-
         with get_db() as conn:
             players = conn.execute(
-                """SELECT id, display_name, discord_username, status
-                   FROM players ORDER BY display_name"""
+                "SELECT * FROM players WHERE status != 'denied' "
+                "ORDER BY display_name"
             ).fetchall()
+        view = PlayerManageSelectView(interaction.client, [dict(p) for p in players])
+        await interaction.response.send_message(
+            "Select a player to manage:", view=view, ephemeral=True
+        )
 
-        if not players:
+    @discord.ui.button(label="End season", style=discord.ButtonStyle.danger,
+                       custom_id="admin:end_season", row=2)
+    async def end_season(self, interaction: discord.Interaction,
+                         button: discord.ui.Button) -> None:
+        if not is_admin(interaction):
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        season = get_active_season()
+        if not season:
             await interaction.response.send_message(
-                "No players registered yet.", ephemeral=True
+                "No active season to end.", ephemeral=True
             )
             return
-
-        view = RemovePlayerSelectView(players, interaction.client)
+        view = EndSeasonConfirmView(interaction.client, dict(season))
         await interaction.response.send_message(
-            "⚠️ Select a player to **permanently remove**. "
-            "All their picks, scores, and data will be deleted.",
+            f"Are you sure you want to end the **{season['year']}** season? "
+            f"This will post final standings and cannot be undone.",
             view=view, ephemeral=True,
         )
-
-
-# ── Remove player flow ────────────────────────────────────────────────────────
-
-class RemovePlayerSelectMenu(discord.ui.Select):
-    def __init__(self, players: list, bot: commands.Bot):
-        self.bot = bot
-        options = [
-            discord.SelectOption(
-                label=f"{p['display_name']}"[:100],
-                value=str(p["id"]),
-                description=f"{p['discord_username']} · {p['status']}"[:100],
-            )
-            for p in players[:25]
-        ]
-        super().__init__(placeholder="Select a player to remove…", options=options)
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        player_id = int(self.values[0])
-        with get_db() as conn:
-            player = conn.execute(
-                "SELECT * FROM players WHERE id=?", (player_id,)
-            ).fetchone()
-        if not player:
-            await interaction.response.send_message(
-                "Player not found.", ephemeral=True
-            )
-            return
-        view = RemovePlayerConfirmView(
-            self.bot, dict(player)
-        )
-        await interaction.response.edit_message(
-            content=(
-                f"⚠️ Are you sure you want to permanently remove "
-                f"**{player['display_name']}** (`{player['discord_username']}`)?\n\n"
-                f"This will delete **all** their picks, scores, and data. "
-                f"This cannot be undone."
-            ),
-            view=view,
-        )
-
-
-class RemovePlayerSelectView(discord.ui.View):
-    def __init__(self, players: list, bot: commands.Bot):
-        super().__init__(timeout=60)
-        self.add_item(RemovePlayerSelectMenu(players, bot))
-
-
-class RemovePlayerConfirmView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, player: dict):
-        super().__init__(timeout=30)
-        self.bot    = bot
-        self.player = player
-
-    @discord.ui.button(label="Yes, remove permanently",
-                       style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction,
-                      button: discord.ui.Button) -> None:
-        pid  = self.player["id"]
-        name = self.player["display_name"]
-
-        with get_db() as conn:
-            conn.execute(
-                "DELETE FROM notifications_sent WHERE player_id=?", (pid,)
-            )
-            conn.execute(
-                "DELETE FROM pick_slots WHERE player_id=?", (pid,)
-            )
-            conn.execute(
-                "DELETE FROM picks WHERE player_id=?", (pid,)
-            )
-            conn.execute(
-                "DELETE FROM weekly_scores WHERE player_id=?", (pid,)
-            )
-            conn.execute(
-                "DELETE FROM registration_requests WHERE discord_id=?",
-                (self.player["discord_id"],)
-            )
-            conn.execute(
-                "DELETE FROM players WHERE id=?", (pid,)
-            )
-
-        from cogs.setup import refresh_picks_hub
-        await refresh_picks_hub(self.bot)
-
-        await _log(
-            self.bot,
-            f"Player **{name}** (`{self.player['discord_username']}`) was "
-            f"permanently removed by {interaction.user}. "
-            "All picks, scores, and data deleted.",
-            title="Player removed", level="warning",
-        )
-        await interaction.response.edit_message(
-            content=f"✅ **{name}** has been permanently removed.",
-            view=None,
-        )
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction,
-                     button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(
-            content="Cancelled — no changes made.", view=None
-        )
-        self.stop()
 
 
 # ── Cog ────────────────────────────────────────────────────────────────────────
