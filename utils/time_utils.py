@@ -1,8 +1,8 @@
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from config import TIMEZONE
 
-ET = ZoneInfo(TIMEZONE)
+ET  = ZoneInfo(TIMEZONE)
 UTC = ZoneInfo("UTC")
 
 
@@ -25,10 +25,10 @@ def parse_iso(s: str) -> datetime:
 def format_time_et(dt: datetime, include_date: bool = True) -> str:
     """Format a datetime for display, e.g. 'Sat Sep 6 · 12:00 PM ET'."""
     dt = to_et(dt)
-    day   = dt.strftime("%a %b ").rstrip() + " " + str(dt.day)
-    hour  = str(dt.hour % 12 or 12)
-    mins  = dt.strftime("%M")
-    ampm  = dt.strftime("%p")
+    day  = dt.strftime("%a %b ").rstrip() + " " + str(dt.day)
+    hour = str(dt.hour % 12 or 12)
+    mins = dt.strftime("%M")
+    ampm = dt.strftime("%p")
     if include_date:
         return f"{day} · {hour}:{mins} {ampm} ET"
     return f"{hour}:{mins} {ampm} ET"
@@ -38,7 +38,15 @@ def format_date_et(dt: datetime) -> str:
     return dt.strftime("%a %b ") + str(dt.day)
 
 def seconds_until(dt: datetime) -> float:
+    """
+    FIX #1 / #3: Accepts a datetime object only.
+    Callers that have an ISO string must call parse_iso() first.
+    """
     return (to_et(dt) - now_et()).total_seconds()
+
+def seconds_until_iso(iso_str: str) -> float:
+    """Convenience wrapper — parse ISO string then compute seconds."""
+    return seconds_until(parse_iso(iso_str))
 
 def game_day_key(kickoff_iso: str) -> str:
     """Return YYYY-MM-DD string for grouping games by calendar day (ET)."""
@@ -58,7 +66,7 @@ def first_kickoff_of_day(games_on_day: list) -> datetime:
 
 def countdown_label(kickoff_iso: str) -> str:
     """Human-readable countdown, e.g. '2h 34m' or '3 days'."""
-    secs = seconds_until(parse_iso(kickoff_iso))
+    secs = seconds_until_iso(kickoff_iso)
     if secs <= 0:
         return "started"
     minutes = int(secs // 60)

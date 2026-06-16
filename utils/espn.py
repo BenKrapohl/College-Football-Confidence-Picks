@@ -1,10 +1,12 @@
 import requests
+import logging
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
-from config import ESPN_SCOREBOARD_URL, ESPN_RANKINGS_URL, POLL_AP, POLL_CFP
+from config import ESPN_SCOREBOARD_URL, ESPN_RANKINGS_URL, POLL_AP
 
-ET = ZoneInfo("America/New_York")
+log = logging.getLogger(__name__)
+ET  = ZoneInfo("America/New_York")
 
 
 def _get(url: str, params: Optional[dict] = None) -> dict:
@@ -36,7 +38,11 @@ def fetch_rankings(poll_type: str = POLL_AP) -> dict[str, int]:
 
 # ── SCHEDULE ──────────────────────────────────────────────────────────────────
 
-def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int]) -> list[dict]:
+def fetch_week_games(
+    start_date: str,
+    end_date: str,
+    ranked_teams: dict[str, int],
+) -> list[dict]:
     """
     Fetch all games in date range, filter to those involving at least one
     ranked team, and return structured game dicts.
@@ -45,9 +51,9 @@ def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int
     ranked_teams: {team_location: rank}
     """
     params = {"dates": f"{start_date}-{end_date}"}
-    data = _get(ESPN_SCOREBOARD_URL, params=params)
+    data   = _get(ESPN_SCOREBOARD_URL, params=params)
 
-    games = []
+    games         = []
     seen_espn_ids = set()
 
     for event in data.get("events", []):
@@ -55,9 +61,10 @@ def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int
         if espn_id in seen_espn_ids:
             continue
 
-        comp = event["competitions"][0]
+        comp        = event["competitions"][0]
         competitors = comp["competitors"]
 
+        # FIX (original Schedules bug): use homeAway field, not index position
         home = next((c for c in competitors if c["homeAway"] == "home"), competitors[0])
         away = next((c for c in competitors if c["homeAway"] == "away"), competitors[1])
 
@@ -86,8 +93,8 @@ def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int
             broadcast = "TBD"
 
         # Odds
-        odds = comp.get("odds", [])
-        spread = ""
+        odds       = comp.get("odds", [])
+        spread     = ""
         over_under = ""
         if odds:
             for o in odds:
@@ -98,21 +105,33 @@ def fetch_week_games(start_date: str, end_date: str, ranked_teams: dict[str, int
 
         # Status
         status_name = event["status"]["type"]["name"]
-        status_map  = {"STATUS_SCHEDULED": "scheduled",
-                       "STATUS_IN_PROGRESS": "in_progress",
-                       "STATUS_FINAL": "final"}
+        status_map  = {
+            "STATUS_SCHEDULED":   "scheduled",
+            "STATUS_IN_PROGRESS": "in_progress",
+            "STATUS_FINAL":       "final",
+        }
         status = status_map.get(status_name, "scheduled")
 
-        # Scores / winner
+        # FIX (original Schedules bug): cast scores to int, not string comparison
         try:
-            home_score = int(home.get("score", 0))
-            away_score = int(away.get("score", 0))
+            home_score = int(home.get("score", 0) or 0)
+            away_score = int(away.get("score", 0) or 0)
         except (TypeError, ValueError):
             home_score = away_score = None
 
+        # FIX: tie handling — if scores are equal at final, mark winner as None
         winner = None
         if status == "final" and home_score is not None and away_score is not None:
-            winner = home_name if home_score > away_score else away_name
+            if home_score > away_score:
+                winner = home_name
+            elif away_score > home_score:
+                winner = away_name
+            else:
+                winner = None  # Tie — should not normally happen in CFB
+                log.warning(
+                    f"Game {espn_id} ({home_name} vs {away_name}) ended in a tie "
+                    f"({home_score}-{away_score}). Winner left as None."
+                )
 
         games.append({
             "espn_game_id": espn_id,
@@ -143,21 +162,21 @@ def fetch_game_status(espn_game_id: str) -> dict | None:
     """
     Fetch current status for a single game by ESPN ID.
     Returns dict with keys: status, home_score, away_score, winner,
-    status_detail (e.g. 'Q3 7:42'), or None on failure.
+    status_detail, or None on failure.
     """
     try:
         url = (
             f"http://site.api.espn.com/apis/site/v2/sports/football/"
             f"college-football/summary?event={espn_game_id}"
         )
-        data = _get(url)
+        data   = _get(url)
         header = data.get("header", {})
-        competitions = header.get("competitions", [{}])
-        comp = competitions[0] if competitions else {}
+        comps  = header.get("competitions", [{}])
+        comp   = comps[0] if comps else {}
 
-        status_obj   = comp.get("status", {})
-        status_type  = status_obj.get("type", {})
-        status_name  = status_type.get("name", "STATUS_SCHEDULED")
+        status_obj    = comp.get("status", {})
+        status_type   = status_obj.get("type", {})
+        status_name   = status_type.get("name", "STATUS_SCHEDULED")
         status_detail = status_type.get("shortDetail", "")
 
         status_map = {
@@ -171,18 +190,25 @@ def fetch_game_status(espn_game_id: str) -> dict | None:
         home = next((c for c in competitors if c.get("homeAway") == "home"), {})
         away = next((c for c in competitors if c.get("homeAway") == "away"), {})
 
+        # FIX: cast scores to int
         try:
-            home_score = int(home.get("score", 0))
-            away_score = int(away.get("score", 0))
+            home_score = int(home.get("score", 0) or 0)
+            away_score = int(away.get("score", 0) or 0)
         except (TypeError, ValueError):
             home_score = away_score = 0
 
         home_name = home.get("team", {}).get("location", "")
         away_name = away.get("team", {}).get("location", "")
 
+        # FIX: tie handling
         winner = None
         if status == "final":
-            winner = home_name if home_score > away_score else away_name
+            if home_score > away_score:
+                winner = home_name
+            elif away_score > home_score:
+                winner = away_name
+            else:
+                winner = None
 
         return {
             "status":        status,
@@ -192,5 +218,6 @@ def fetch_game_status(espn_game_id: str) -> dict | None:
             "status_detail": status_detail,
         }
 
-    except Exception:
+    except Exception as exc:
+        log.debug(f"fetch_game_status({espn_game_id}) failed: {exc}")
         return None
