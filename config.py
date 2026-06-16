@@ -31,22 +31,23 @@ POLL_CFP            = "cfp"
 POLL_AP_LABEL       = "AP Top 25"
 POLL_CFP_LABEL      = "CFP Rankings"
 
-# ── Scoring ───────────────────────────────────────────────────────────────────
+# ── Season ────────────────────────────────────────────────────────────────────
 SEASON_YEAR         = 2026
 
 # ── Refresh intervals (seconds) ──────────────────────────────────────────────
-REFRESH_LIVE_GAME   = 90       # live score updates
-REFRESH_GAMEDAY     = 300      # picks panel on game days
-REFRESH_OFFWEEK     = 21600    # 6 hours between weeks
-REFRESH_STANDINGS   = 300      # standings panel
+REFRESH_LIVE_GAME   = 90        # live score updates
+REFRESH_GAMEDAY     = 300       # picks panel on game days
+REFRESH_OFFWEEK     = 21600     # 6 hours between weeks
+REFRESH_STANDINGS   = 300       # standings panel
 
 # ── Notification windows (seconds) ───────────────────────────────────────────
 NOTIF_24HR          = 86400
 NOTIF_30MIN         = 1800
-NOTIF_CHECK_INTERVAL = 900     # scheduler tick every 15 min
+NOTIF_CHECK_INTERVAL = 900      # scheduler tick every 15 min
 
 # ── Bot behavior ──────────────────────────────────────────────────────────────
 PICKS_REVEAL_DEFAULT    = True   # show who picked what after lock
+# FIX #26: Single source of truth — was duplicated in scoring.py
 ESPN_FINAL_GRACE_SECS   = 180    # wait 3 min after 'post' before scoring
 STALE_WEEK_HOURS        = 48     # log warning if week not loaded
 
@@ -62,3 +63,22 @@ COLOR_BLUE          = 0x185FA5
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE            = "America/New_York"
+
+
+# ── FIX #17: Startup validation ───────────────────────────────────────────────
+def validate_config() -> list[str]:
+    """
+    Returns a list of error strings. Empty list = config is valid.
+    Call this before starting the bot so misconfigurations fail fast.
+    """
+    errors = []
+    if not DISCORD_TOKEN:
+        errors.append("DISCORD_TOKEN is not set in .env")
+    if GUILD_ID == 0:
+        errors.append("GUILD_ID is not set or is 0 in .env")
+    if ADMIN_ROLE_ID == 0:
+        errors.append(
+            "ADMIN_ROLE_ID is not set or is 0 in .env — "
+            "no one will be able to use admin functions"
+        )
+    return errors

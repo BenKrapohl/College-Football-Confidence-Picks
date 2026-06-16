@@ -1,6 +1,17 @@
+# Discord
 discord.py==2.4.0
-python-dotenv==1.0.1
+
+# HTTP requests to ESPN API
 requests==2.32.3
-apscheduler==3.10.4
-openpyxl==3.1.5
+
+# .env file loading
+python-dotenv==1.0.1
+
+# zoneinfo is part of the Python 3.9+ standard library.
+# This entry is only needed as a backport on Python 3.8 and earlier.
+# If you're on Python 3.9+, this line has no effect and can be ignored.
 zoneinfo; python_version < "3.9"
+
+# NOTE: APScheduler was removed in v2.0 — it was listed as a dependency
+# in v1 but never actually imported anywhere. All scheduled tasks use
+# discord.py's built-in @tasks.loop instead.

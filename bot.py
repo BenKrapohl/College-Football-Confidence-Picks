@@ -1,10 +1,9 @@
 import discord
 from discord.ext import commands
-import asyncio
 import logging
 import os
-from config import DISCORD_TOKEN, GUILD_ID, SEASON_YEAR
-from database import init_db, config_get, config_set, get_active_season, get_db
+from config import DISCORD_TOKEN, GUILD_ID, SEASON_YEAR, validate_config
+from database import init_db, get_active_season, get_db
 
 # Ensure data directory exists before logging tries to create the log file
 os.makedirs("data", exist_ok=True)
@@ -22,9 +21,9 @@ log = logging.getLogger("cfcp_bot")
 
 # ── Intents ───────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.guilds        = True
+intents.guilds         = True
 intents.guild_messages = True
-intents.members       = True
+intents.members        = True
 intents.message_content = True
 
 
@@ -37,11 +36,9 @@ class CFCPBot(commands.Bot):
         )
 
     async def setup_hook(self):
-        # Initialise DB
         init_db()
         self._ensure_season()
 
-        # Load cogs
         cog_files = [
             "cogs.admin",
             "cogs.picks",
@@ -57,7 +54,6 @@ class CFCPBot(commands.Bot):
             except Exception as exc:
                 log.error(f"Failed to load cog {cog}: {exc}", exc_info=True)
 
-        # Sync app commands to guild
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_obj)
@@ -82,13 +78,10 @@ class CFCPBot(commands.Bot):
             log.error(f"Guild {GUILD_ID} not found — check GUILD_ID in .env")
             return
 
-        # Run channel / panel setup
         from cogs.setup import setup_channels
         await setup_channels(self, guild)
 
-        # Register persistent views so buttons survive restarts
         self._register_persistent_views()
-
         log.info("CFCP Bot is ready.")
 
     def _register_persistent_views(self):
@@ -104,11 +97,12 @@ class CFCPBot(commands.Bot):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    if not DISCORD_TOKEN:
-        log.critical("DISCORD_TOKEN not set in .env — cannot start.")
-        return
-    if not GUILD_ID:
-        log.critical("GUILD_ID not set in .env — cannot start.")
+    # FIX #17: Validate config before attempting to start
+    errors = validate_config()
+    if errors:
+        for err in errors:
+            log.critical(f"Config error: {err}")
+        log.critical("Fix the above errors in your .env file before starting.")
         return
 
     bot = CFCPBot()

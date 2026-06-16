@@ -1,8 +1,12 @@
 import sqlite3
 import os
+import logging
 from contextlib import contextmanager
 
+log = logging.getLogger(__name__)
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cfcp.db")
+
 
 @contextmanager
 def get_db():
@@ -10,6 +14,8 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # FIX #6: Use UTC for all timestamps — avoids server-timezone drift
+    conn.execute("PRAGMA timezone='utc'")
     try:
         yield conn
         conn.commit()
@@ -18,6 +24,7 @@ def get_db():
         raise
     finally:
         conn.close()
+
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -34,7 +41,7 @@ def init_db():
                 dm_notifications    INTEGER NOT NULL DEFAULT 1,
                 picks_visible       INTEGER NOT NULL DEFAULT 1,
                 joined_week         INTEGER,
-                created_at          TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+                created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             -- ── SEASONS ──────────────────────────────────────────────
@@ -44,7 +51,8 @@ def init_db():
                 poll_type           TEXT    NOT NULL DEFAULT 'ap',
                 -- ap | cfp
                 is_active           INTEGER NOT NULL DEFAULT 1,
-                created_at          TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+                ended_at            TEXT,
+                created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             -- ── WEEKS ────────────────────────────────────────────────
@@ -74,7 +82,7 @@ def init_db():
                 spread              TEXT,
                 over_under          TEXT,
                 kickoff_time        TEXT    NOT NULL,
-                -- stored as ISO8601 in US/Eastern
+                -- stored as ISO8601 UTC
                 channel             TEXT,
                 espn_link           TEXT,
                 status              TEXT    NOT NULL DEFAULT 'scheduled',
@@ -100,8 +108,7 @@ def init_db():
                 is_forfeit          INTEGER NOT NULL DEFAULT 0,
                 submitted_at        TEXT,
                 scored_at           TEXT,
-                UNIQUE(player_id, game_id),
-                UNIQUE(player_id, game_id, confidence_points)
+                UNIQUE(player_id, game_id)
             );
 
             -- Separate unique constraint: one confidence value per player per week
@@ -136,7 +143,7 @@ def init_db():
                 -- YYYY-MM-DD of the day group
                 notif_type          TEXT    NOT NULL,
                 -- week_open | 24hr | 30min | recap
-                sent_at             TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                sent_at             TEXT    NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(player_id, week_id, game_day, notif_type)
             );
 
@@ -148,7 +155,7 @@ def init_db():
                 display_name        TEXT    NOT NULL,
                 status              TEXT    NOT NULL DEFAULT 'pending',
                 -- pending | approved | denied
-                requested_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                requested_at        TEXT    NOT NULL DEFAULT (datetime('now')),
                 reviewed_at         TEXT,
                 reviewed_by         TEXT
             );
@@ -157,7 +164,15 @@ def init_db():
             CREATE TABLE IF NOT EXISTS bot_config (
                 key                 TEXT    PRIMARY KEY,
                 value               TEXT    NOT NULL,
-                updated_at          TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+                updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- ── FIX #11: Grace period persistence ────────────────────
+            -- Tracks games in the ESPN final grace window so bot restarts
+            -- don't lose scoring state.
+            CREATE TABLE IF NOT EXISTS scoring_grace (
+                game_id             INTEGER PRIMARY KEY REFERENCES games(id),
+                grace_started_at    TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             -- ── INDEXES ───────────────────────────────────────────────
@@ -169,10 +184,11 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_weekly_week    ON weekly_scores(week_id);
             CREATE INDEX IF NOT EXISTS idx_notif_player   ON notifications_sent(player_id, week_id);
         """)
-    print(f"Database initialized at {DB_PATH}")
+    # FIX #27: Use logger instead of print
+    log.info(f"Database initialized at {DB_PATH}")
 
 
-# ── CONFIG HELPERS ───────────────────────────────────────────────────────────
+# ── CONFIG HELPERS ────────────────────────────────────────────────────────────
 
 def config_get(key: str, default=None):
     with get_db() as conn:
@@ -185,7 +201,7 @@ def config_set(key: str, value: str):
     with get_db() as conn:
         conn.execute("""
             INSERT INTO bot_config(key, value, updated_at)
-            VALUES (?, ?, datetime('now','localtime'))
+            VALUES (?, ?, datetime('now'))
             ON CONFLICT(key) DO UPDATE SET
                 value      = excluded.value,
                 updated_at = excluded.updated_at
@@ -200,21 +216,61 @@ def get_active_season():
             "SELECT * FROM seasons WHERE is_active = 1 ORDER BY year DESC LIMIT 1"
         ).fetchone()
 
-def get_current_week(season_id: int):
+def end_active_season():
+    """Mark the current season as ended. Used by the End Season admin flow."""
     with get_db() as conn:
-        return conn.execute("""
+        conn.execute(
+            "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
+        )
+
+def create_season(year: int, poll_type: str = "ap"):
+    """Deactivate any running season and create a new one."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO seasons(year, poll_type, is_active) VALUES (?,?,1)",
+            (year, poll_type),
+        )
+
+# FIX #7: get_current_week now uses date-range matching with fallback
+def get_current_week(season_id: int):
+    """
+    Returns the week whose start_date <= today <= end_date.
+    Falls back to the most recently loaded week if no date-range match
+    (handles the case where an admin loads next week early).
+    """
+    with get_db() as conn:
+        # Try date-range match first
+        matched = conn.execute("""
             SELECT * FROM weeks
             WHERE season_id = ?
-              AND start_date <= date('now','localtime')
-              AND end_date   >= date('now','localtime')
+              AND start_date <= date('now')
+              AND end_date   >= date('now')
             LIMIT 1
         """, (season_id,)).fetchone()
+        if matched:
+            return matched
+        # Fallback: most recently loaded week (covers pre-season / off-week)
+        return conn.execute(
+            "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
+            (season_id,)
+        ).fetchone()
 
 def get_week_by_number(season_id: int, week_number: int):
     with get_db() as conn:
         return conn.execute(
             "SELECT * FROM weeks WHERE season_id = ? AND week_number = ?",
             (season_id, week_number)
+        ).fetchone()
+
+def get_latest_week(season_id: int):
+    """Always returns the most recently inserted week regardless of dates."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
+            (season_id,)
         ).fetchone()
 
 
@@ -230,6 +286,15 @@ def get_all_active_players():
     with get_db() as conn:
         return conn.execute(
             "SELECT * FROM players WHERE status = 'active' ORDER BY display_name"
+        ).fetchall()
+
+# FIX #10: Separate helper that includes withdrawn players for scoring
+def get_all_scoreable_players():
+    """Returns active + withdrawn players — both need their scores maintained."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM players WHERE status IN ('active', 'withdrawn') "
+            "ORDER BY display_name"
         ).fetchall()
 
 
@@ -312,3 +377,38 @@ def get_week_leaderboard(week_id: int):
             WHERE pl.status IN ('active', 'withdrawn')
             ORDER BY points_earned DESC, correct_picks DESC
         """, (week_id,)).fetchall()
+
+
+# ── GRACE PERIOD HELPERS (FIX #11) ───────────────────────────────────────────
+
+def grace_start(game_id: int):
+    """Record that a game entered the scoring grace period."""
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO scoring_grace(game_id) VALUES (?)",
+            (game_id,)
+        )
+
+def grace_elapsed_secs(game_id: int) -> float | None:
+    """
+    Returns seconds since grace started, or None if not in grace period.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT grace_started_at FROM scoring_grace WHERE game_id=?",
+            (game_id,)
+        ).fetchone()
+    if not row:
+        return None
+    from datetime import datetime, timezone
+    started = datetime.fromisoformat(row["grace_started_at"]).replace(
+        tzinfo=timezone.utc
+    )
+    return (datetime.now(tz=timezone.utc) - started).total_seconds()
+
+def grace_clear(game_id: int):
+    """Remove a game from the grace period table after scoring."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM scoring_grace WHERE game_id=?", (game_id,)
+        )
