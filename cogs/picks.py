@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from config import COLOR_PURPLE, COLOR_GREEN
 from database import (get_db, config_get, get_all_active_players,
                       get_player_by_discord_id, get_used_slots_for_week)
-from utils.helpers import is_admin, log_to_channel, resolve_current_week
+from utils.helpers import is_admin, log_to_channel, resolve_current_week, send_dm
 from utils.time_utils import format_time_et, seconds_until_iso
 
 log = logging.getLogger(__name__)
@@ -452,8 +452,36 @@ class PicksHubEphemeralView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _on_close(self, interaction: discord.Interaction) -> None:
+        # Check if the player has fully submitted their board, if so DM receipt
+        with get_db() as conn:
+            picks = conn.execute(
+                """SELECT pk.picked_team, pk.confidence_points,
+                          g.home_team, g.away_team
+                   FROM picks pk
+                   JOIN games g ON pk.game_id = g.id
+                   WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0
+                   ORDER BY pk.confidence_points DESC""",
+                (self.player_id, self.week["id"])
+            ).fetchall()
+
+        if len(picks) == self.week["game_count"] and self.week["game_count"] > 0:
+            lines = [
+                f"`{p['confidence_points']:>2}` {p['picked_team']} "
+                f"({p['home_team']} vs {p['away_team']})" for p in picks
+            ]
+            receipt = (
+                f"🧾 **Your Week {self.week['week_number']} Picks Receipt**\n"
+                "You've successfully submitted all your picks for the week! "
+                "Here is your current board:\n\n"
+                + "\n".join(lines) +
+                "\n\n*You can still edit these in the server until each game's kickoff.*"
+            )
+            player = _get_player(str(interaction.user.id))
+            if player and player["dm_notifications"]:
+                await send_dm(self.bot, player["discord_id"], receipt)
+
         await interaction.response.edit_message(
-            content="Picks session closed.", embed=None, view=None
+            content="Picks session closed. Good luck!", embed=None, view=None
         )
         self.stop()
 
@@ -809,10 +837,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
 # ── Forfeit assignment ─────────────────────────────────────────────────────────
 
 async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
-    """
-    Assign forfeit picks using a highly optimized bulk insert to avoid
-    database thrashing (N+1 query problem).
-    """
     from database import get_all_scoreable_players
     players = get_all_scoreable_players()
 
@@ -888,6 +912,53 @@ class CurrentPicksView(discord.ui.View):
         super().__init__(timeout=120)
         self.bot       = bot
         self.player_id = player_id
+
+    @discord.ui.button(label="📩 DM me a copy", style=discord.ButtonStyle.primary)
+    async def dm_copy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = _get_player(str(interaction.user.id))
+        if not player or not player["dm_notifications"]:
+            await interaction.response.send_message(
+                "You have DMs disabled in the bot settings or server settings.",
+                ephemeral=True
+            )
+            return
+            
+        season, week = resolve_current_week()
+        if not week:
+            await interaction.response.send_message("No active week.", ephemeral=True)
+            return
+            
+        with get_db() as conn:
+            picks = conn.execute(
+                """SELECT pk.picked_team, pk.confidence_points,
+                          g.home_team, g.away_team
+                   FROM picks pk
+                   JOIN games g ON pk.game_id = g.id
+                   WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0
+                   ORDER BY pk.confidence_points DESC""",
+                (self.player_id, week["id"])
+            ).fetchall()
+
+        if not picks:
+            await interaction.response.send_message("You haven't made any picks yet.", ephemeral=True)
+            return
+            
+        lines = [
+            f"`{p['confidence_points']:>2}` {p['picked_team']} "
+            f"({p['home_team']} vs {p['away_team']})" for p in picks
+        ]
+        
+        receipt = (
+            f"🧾 **Your Week {week['week_number']} Picks Receipt**\n"
+            f"You currently have {len(picks)}/{week['game_count']} picks locked in:\n\n"
+            + "\n".join(lines)
+        )
+        
+        sent = await send_dm(self.bot, player["discord_id"], receipt)
+        if sent:
+            await interaction.response.send_message("✅ A copy of your picks has been sent to your DMs!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Failed to send DM. Check your privacy settings.", ephemeral=True)
 
     @discord.ui.button(label="View pick history", style=discord.ButtonStyle.secondary)
     async def history(self, interaction: discord.Interaction,
