@@ -6,7 +6,6 @@ import logging
 
 from config import NOTIF_24HR, NOTIF_30MIN, NOTIF_CHECK_INTERVAL
 from database import get_db, get_all_active_players
-# FIX #25: shared helpers
 from utils.helpers import resolve_current_week, send_dm, log_to_channel
 from utils.time_utils import (format_time_et, parse_iso,
                               group_games_by_day, first_kickoff_of_day,
@@ -20,11 +19,6 @@ log = logging.getLogger(__name__)
 async def _notify_missing_picks(bot: commands.Bot, week: dict,
                                 game_day: str, games_on_day: list,
                                 notif_type: str, hours_label: str) -> None:
-    """
-    For every active player who hasn't picked all games kicking off on
-    `game_day`, send a DM reminder. Records the send in notifications_sent
-    so it's not duplicated.
-    """
     players = get_all_active_players()
     game_ids_today = {g["id"] for g in games_on_day}
 
@@ -49,6 +43,12 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
                     (player["id"], week["id"])
                 ).fetchall()
             }
+            
+            # Fetch total picks submitted by this player for the week so far
+            week_picks_count = conn.execute(
+                "SELECT COUNT(*) as c FROM picks WHERE player_id=? AND week_id=? AND is_forfeit=0",
+                (player["id"], week["id"])
+            ).fetchone()["c"]
 
         missing = game_ids_today - picked_ids
         if not missing:
@@ -71,11 +71,10 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
 
         message = (
             f"🏈 **CFCP reminder — {hours_label} until kickoff!**\n\n"
-            f"You haven't picked **{len(missing_games)}** game(s) "
-            f"kicking off soon:\n"
+            f"📊 **Week Progress:** You have locked in **{week_picks_count}/{week['game_count']}** picks for the week.\n\n"
+            f"⚠️ You still need to pick **{len(missing_games)}** game(s) kicking off soon:\n"
             + "\n".join(lines) +
-            "\n\nHead to #cfcp-picks and use **Submit picks** to lock in "
-            "your picks before kickoff!"
+            "\n\nHead to #cfcp-picks and use **Submit picks** to lock them in before time runs out!"
         )
 
         sent = await send_dm(bot, player["discord_id"], message)
@@ -110,7 +109,6 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
 # ── Weekly recap ──────────────────────────────────────────────────────────────
 
 async def send_weekly_recap(bot: commands.Bot, week_id: int) -> None:
-    """DM every active player their weekly results."""
     with get_db() as conn:
         week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
     if not week:
@@ -232,10 +230,6 @@ class NotificationsCog(commands.Cog):
 
             for game_day, day_games in day_groups.items():
                 first_kick = first_kickoff_of_day(day_games)
-                # FIX #1: first_kickoff_of_day returns a datetime object,
-                # so seconds_until() (datetime-only) is correct here.
-                # Raw ISO strings from the DB must instead go through
-                # seconds_until_iso() — see picks.py's _game_is_locked().
                 secs_to_first = seconds_until(first_kick)
 
                 if NOTIF_24HR - NOTIF_CHECK_INTERVAL <= secs_to_first <= NOTIF_24HR:
