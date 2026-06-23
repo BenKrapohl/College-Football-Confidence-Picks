@@ -10,9 +10,7 @@ from zoneinfo import ZoneInfo
 from config import COLOR_PURPLE, COLOR_GREEN
 from database import (get_db, config_get, get_all_active_players,
                       get_player_by_discord_id, get_used_slots_for_week)
-# FIX #25: import shared helpers instead of duplicating them
 from utils.helpers import is_admin, log_to_channel, resolve_current_week
-# FIX #1 / #3: use seconds_until_iso for string kickoff times
 from utils.time_utils import format_time_et, seconds_until_iso
 
 log = logging.getLogger(__name__)
@@ -26,11 +24,9 @@ def _get_player(discord_id: str):
 
 
 def _game_is_locked(game: dict) -> bool:
-    """A game is locked if its kickoff has passed OR it is in progress / final."""
     if game.get("status") in ("in_progress", "final"):
         return True
     try:
-        # FIX #1 / #3: seconds_until_iso accepts a raw ISO string
         secs = seconds_until_iso(game["kickoff_time"])
         return secs <= 0
     except Exception:
@@ -60,8 +56,6 @@ async def _refresh_picks_hub(bot: commands.Bot) -> None:
             ).fetchone()["c"]
             player_list.append({
                 **dict(p),
-                # FIX #22: submitted = picked at least as many games as were
-                # available when they last submitted, capped at game_count
                 "submitted": count >= week["game_count"]
             })
     await refresh_picks_hub(
@@ -228,7 +222,7 @@ class ApprovalView(discord.ui.View):
             )
 
         for item in self.children:
-            item.disabled = True  # type: ignore
+            item.disabled = True  
         await interaction.message.edit(view=self)
 
         await interaction.response.send_message(
@@ -295,7 +289,7 @@ class ApprovalView(discord.ui.View):
             )
 
         for item in self.children:
-            item.disabled = True  # type: ignore
+            item.disabled = True  
         await interaction.message.edit(view=self)
 
         await interaction.response.send_message(
@@ -446,7 +440,7 @@ class PicksHubEphemeralView(discord.ui.View):
         self.add_item(close_btn)
 
     async def _on_game_select(self, interaction: discord.Interaction) -> None:
-        game_id = int(interaction.data["values"][0])  # type: ignore
+        game_id = int(interaction.data["values"][0])  
         game    = next((g for g in self.games if g["id"] == game_id), None)
         if not game:
             await interaction.response.send_message(
@@ -564,8 +558,6 @@ def _build_slot_embed(player_id: int, week: dict,
         color=COLOR_GREEN,
     )
 
-    # FIX #2: Removed the broken gstatus query that used confidence_points as
-    # a game ID. Build slot context from pick_slots joined correctly.
     with get_db() as conn:
         slot_map = {
             r["confidence_points"]: r
@@ -676,7 +668,7 @@ class SlotSelectView(discord.ui.View):
         self.add_item(back_btn)
 
     async def _on_slot_select(self, interaction: discord.Interaction) -> None:
-        value = interaction.data["values"][0]  # type: ignore
+        value = interaction.data["values"][0]  
 
         if value.startswith("override_"):
             slot = int(value.split("_")[1])
@@ -818,65 +810,75 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
 
 async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
     """
-    When a game's kickoff passes, assign forfeit picks to any player
-    who hasn't picked it. Give them the lowest unused confidence slot.
-
-    FIX #8: Uses INSERT OR IGNORE on both tables so re-runs on restart are safe.
-    FIX #10: Uses get_all_scoreable_players() so withdrawn players receive forfeits.
+    Assign forfeit picks using a highly optimized bulk insert to avoid
+    database thrashing (N+1 query problem).
     """
     from database import get_all_scoreable_players
     players = get_all_scoreable_players()
+
     with get_db() as conn:
+        week = conn.execute("SELECT game_count FROM weeks WHERE id=?", (week_id,)).fetchone()
+        total = week["game_count"] if week else 1
+
+        all_slots = conn.execute(
+            "SELECT player_id, confidence_points FROM pick_slots WHERE week_id=?", 
+            (week_id,)
+        ).fetchall()
+        
+        used_slots_map = {}
+        for r in all_slots:
+            used_slots_map.setdefault(r["player_id"], set()).add(r["confidence_points"])
+
+        all_picks = conn.execute(
+            "SELECT player_id FROM picks WHERE game_id=?", 
+            (game["id"],)
+        ).fetchall()
+        picked_players = {r["player_id"] for r in all_picks}
+
+        insert_picks = []
+        insert_slots = []
+
         for player in players:
-            existing = conn.execute(
-                "SELECT id FROM picks WHERE player_id=? AND game_id=?",
-                (player["id"], game["id"])
-            ).fetchone()
-            if existing:
+            pid = player["id"]
+            
+            if pid in picked_players:
                 continue
 
-            used = {r["confidence_points"] for r in conn.execute(
-                "SELECT confidence_points FROM pick_slots "
-                "WHERE player_id=? AND week_id=?",
-                (player["id"], week_id)
-            ).fetchall()}
-
-            week = conn.execute(
-                "SELECT game_count FROM weeks WHERE id=?", (week_id,)
-            ).fetchone()
-            total = week["game_count"] if week else 1
-
+            used = used_slots_map.get(pid, set())
+            
             forfeit_slot = None
             for slot in range(1, total + 1):
                 if slot not in used:
                     forfeit_slot = slot
                     break
 
-            if forfeit_slot is None:
-                continue
+            if forfeit_slot is not None:
+                insert_picks.append((pid, game["id"], forfeit_slot))
+                insert_slots.append((pid, week_id, forfeit_slot, game["id"]))
 
-            # FIX #8: INSERT OR IGNORE prevents duplicate on restart
-            conn.execute(
+        if insert_picks:
+            conn.executemany(
                 """INSERT OR IGNORE INTO picks(player_id, game_id, picked_team,
                    confidence_points, is_forfeit, submitted_at)
                    VALUES (?,?,NULL,?,1,datetime('now'))""",
-                (player["id"], game["id"], forfeit_slot)
+                insert_picks
             )
-            conn.execute(
+            conn.executemany(
                 """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
                    VALUES (?,?,?,?)
                    ON CONFLICT(player_id, week_id, confidence_points)
                    DO UPDATE SET game_id=excluded.game_id""",
-                (player["id"], week_id, forfeit_slot, game["id"])
+                insert_slots
             )
 
-    await log_to_channel(
-        bot,
-        f"Picks locked for **{game['home_team']} vs {game['away_team']}** — "
-        "forfeits assigned to players who missed this game.",
-        title="Game locked",
-        level="info",
-    )
+    if insert_picks:
+        await log_to_channel(
+            bot,
+            f"Picks locked for **{game['home_team']} vs {game['away_team']}** — "
+            f"forfeits assigned to {len(insert_picks)} players.",
+            title="Game locked",
+            level="info",
+        )
 
 
 # ── Current picks view ────────────────────────────────────────────────────────
@@ -1093,8 +1095,6 @@ class PicksCog(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def lock_checker(self) -> None:
-        """Every minute: check for games whose kickoff has passed,
-        assign forfeits, update embeds."""
         try:
             season, week = resolve_current_week()
             if not week:
@@ -1112,7 +1112,6 @@ class PicksCog(commands.Cog):
 
             for game in games:
                 game_dict = dict(game)
-                # FIX #1 / #3: use seconds_until_iso
                 secs = seconds_until_iso(game_dict["kickoff_time"])
 
                 if secs <= 0 and secs > -300:
@@ -1120,7 +1119,7 @@ class PicksCog(commands.Cog):
 
                 if secs <= 0 and game_dict.get("espn_game_id") and \
                    not game_dict["espn_game_id"].startswith("manual_"):
-                    result = fetch_game_status(game_dict["espn_game_id"])
+                    result = await fetch_game_status(game_dict["espn_game_id"])
                     if result:
                         with get_db() as conn:
                             conn.execute(
