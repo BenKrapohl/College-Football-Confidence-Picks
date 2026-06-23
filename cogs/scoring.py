@@ -3,12 +3,10 @@ from discord.ext import commands
 from discord.ext import tasks
 import logging
 
-# FIX #26: single source of truth, imported from config — no local redefinition
 from config import ESPN_FINAL_GRACE_SECS
 from database import (get_db, config_get, get_all_scoreable_players,
                       get_week_leaderboard, grace_start, grace_elapsed_secs,
                       grace_clear)
-# FIX #25: shared helpers
 from utils.helpers import log_to_channel, resolve_current_week
 from utils.espn import fetch_game_status
 from utils.embeds import standings_week_embed, standings_season_embed
@@ -19,15 +17,6 @@ log = logging.getLogger(__name__)
 # ── Single game scoring ─────────────────────────────────────────────────────
 
 async def score_single_game(bot: commands.Bot, game_id: int) -> None:
-    """
-    Score every player's pick on this single game.
-    Called once a game's status flips to 'final'.
-
-    FIX #9: handles ties — if winner is None, no one is "correct" but no one
-    is "wrong" either; the pick contributes to total_possible only.
-    FIX #10: uses get_all_scoreable_players() so withdrawn players' weekly
-    scores stay accurate.
-    """
     with get_db() as conn:
         game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
         if not game or game["status"] != "final":
@@ -37,13 +26,12 @@ async def score_single_game(bot: commands.Bot, game_id: int) -> None:
             "SELECT * FROM picks WHERE game_id=?", (game_id,)
         ).fetchall()
 
-        winner = game["winner"]  # may be None on a tie
+        winner = game["winner"]  
 
         for pick in picks:
             if pick["is_forfeit"]:
                 is_correct = 0
             elif winner is None:
-                # FIX #9: tie — pick neither right nor wrong, scored_at still set
                 is_correct = None
             else:
                 is_correct = 1 if pick["picked_team"] == winner else 0
@@ -62,21 +50,10 @@ async def score_single_game(bot: commands.Bot, game_id: int) -> None:
 # ── Weekly score recalculation ───────────────────────────────────────────────
 
 async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
-    """
-    Recompute weekly_scores for every player who has any picks in this week.
-
-    FIX #10: iterate over get_all_scoreable_players() (active + withdrawn)
-    instead of get_all_active_players(), so a withdrawn player's weekly
-    total doesn't go stale after they leave.
-    """
     players = get_all_scoreable_players()
 
     with get_db() as conn:
         for player in players:
-            # FIX #9: join the game's status/winner so we can correctly
-            # distinguish "not yet scored" (game still in progress, exclude
-            # from totals entirely) from "tie" (final, no winner, counts
-            # toward total_possible only).
             rows = conn.execute(
                 """SELECT pk.confidence_points, pk.is_correct, pk.is_forfeit,
                           g.status as g_status, g.winner as g_winner
@@ -102,13 +79,11 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
                     continue
 
                 if r["g_status"] != "final":
-                    continue  # game not yet decided — excluded from totals
+                    continue  
 
                 total_possible += pts
 
                 if r["g_winner"] is None:
-                    # FIX #9: tie — counts toward total_possible only,
-                    # neither correct nor wrong
                     continue
 
                 if r["is_correct"] == 1:
@@ -130,7 +105,6 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
             """, (player["id"], week_id, points_earned, correct_picks,
                   wrong_picks, forfeited_picks, total_possible))
 
-        # Compute weekly ranks
         scores = conn.execute("""
             SELECT id, player_id, points_earned, correct_picks
             FROM weekly_scores WHERE week_id=?
@@ -179,12 +153,6 @@ async def _refresh_standings(bot: commands.Bot, week_id: int) -> None:
 # ── Game-day scoring poll ────────────────────────────────────────────────────
 
 class ScoringCog(commands.Cog):
-    """
-    FIX #11: Replaces the in-memory `self._pending_finals` dict with the
-    persisted `scoring_grace` table (via grace_start/grace_elapsed_secs/
-    grace_clear in database.py). If the bot restarts mid-grace-window, the
-    game is picked back up on the next poll instead of being stuck forever.
-    """
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.score_poller.start()
@@ -210,19 +178,16 @@ class ScoringCog(commands.Cog):
             from cogs.admin import update_single_game_embed
 
             for game in games:
-                result = fetch_game_status(game["espn_game_id"])
+                result = await fetch_game_status(game["espn_game_id"])
                 if not result:
                     continue
 
                 espn_status = result["status"]
 
                 if espn_status == "final":
-                    # FIX #11: persist grace-period start instead of in-memory dict
                     elapsed = grace_elapsed_secs(game["id"])
                     if elapsed is None:
                         grace_start(game["id"])
-                        # Update status to in_progress→final transition is
-                        # written immediately but scoring waits for the grace.
                         with get_db() as conn:
                             conn.execute(
                                 """UPDATE games SET home_score=?, away_score=?
@@ -234,7 +199,6 @@ class ScoringCog(commands.Cog):
                     if elapsed < ESPN_FINAL_GRACE_SECS:
                         continue
 
-                    # Grace period elapsed — commit final status and score
                     with get_db() as conn:
                         conn.execute(
                             """UPDATE games SET status='final', home_score=?,
@@ -283,16 +247,6 @@ class ScoringCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _check_week_complete(self, week_id: int) -> None:
-        """
-        Trigger recap when all games in the week are final.
-
-        FIX #20: Previously, a manually-added game stuck in 'scheduled'
-        would silently prevent the recap forever. Now: if every
-        *non-manual* game is final AND every manual game has had results
-        entered (status='final' via Set results), recap fires. If manual
-        games remain unscored while everything else is final, we log a
-        one-time reminder so the admin knows to use Set results.
-        """
         with get_db() as conn:
             week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
             if not week or week["recap_sent"]:
@@ -325,13 +279,10 @@ class ScoringCog(commands.Cog):
                 )
             await log_to_channel(
                 self.bot,
-                f"Week {week['week_number']} complete — all {total} games final. "
-                f"Recap sent.",
+                f"Week {week['week_number']} complete — all {total} games final. Recap sent.",
                 title="Week complete", level="success",
             )
         elif pending_manual > 0 and final == (total - pending_manual):
-            # Only manual games remain — remind once per check by writing
-            # a flag so we don't spam every 90 seconds.
             reminder_key = f"manual_pending_reminder_week_{week_id}"
             if not config_get(reminder_key):
                 from database import config_set
