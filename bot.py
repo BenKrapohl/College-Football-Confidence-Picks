@@ -5,7 +5,6 @@ import os
 from config import DISCORD_TOKEN, GUILD_ID, SEASON_YEAR, validate_config
 from database import init_db, get_active_season, get_db
 
-# Ensure data directory exists before logging tries to create the log file
 os.makedirs("data", exist_ok=True)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -53,12 +52,22 @@ class CFCPBot(commands.Bot):
                 log.info(f"Loaded cog: {cog}")
             except Exception as exc:
                 log.error(f"Failed to load cog {cog}: {exc}", exc_info=True)
+                
+        # Auto-sync removed to avoid Discord rate limiting.
+        # Run !cfcp sync in Discord to manually update slash commands.
 
+    @commands.command(name="sync")
+    @commands.has_permissions(administrator=True)
+    async def sync_tree(self, ctx: commands.Context):
+        """Manually sync slash commands (Admin only)"""
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_obj)
             await self.tree.sync(guild=guild_obj)
-            log.info(f"Slash commands synced to guild {GUILD_ID}")
+            await ctx.send(f"✅ Slash commands synced to guild {GUILD_ID}.")
+        else:
+            await self.tree.sync()
+            await ctx.send("✅ Slash commands synced globally.")
 
     def _ensure_season(self):
         season = get_active_season()
@@ -91,13 +100,12 @@ class CFCPBot(commands.Bot):
         self.add_view(PicksHubView())
 
     async def on_guild_channel_pins_update(self, channel, last_pin):
-        pass  # suppress default pin notifications
+        pass  
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # FIX #17: Validate config before attempting to start
     errors = validate_config()
     if errors:
         for err in errors:
@@ -107,7 +115,6 @@ def main():
 
     bot = CFCPBot()
     bot.run(DISCORD_TOKEN, log_handler=None)
-
 
 if __name__ == "__main__":
     main()
