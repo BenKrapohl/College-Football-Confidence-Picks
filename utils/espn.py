@@ -1,4 +1,4 @@
-import requests
+import aiohttp
 import logging
 from datetime import datetime
 from typing import Optional
@@ -9,20 +9,21 @@ log = logging.getLogger(__name__)
 ET  = ZoneInfo("America/New_York")
 
 
-def _get(url: str, params: Optional[dict] = None) -> dict:
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+async def _get(url: str, params: Optional[dict] = None) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=10) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
 
 # ── RANKINGS ──────────────────────────────────────────────────────────────────
 
-def fetch_rankings(poll_type: str = POLL_AP) -> dict[str, int]:
+async def fetch_rankings(poll_type: str = POLL_AP) -> dict[str, int]:
     """
     Returns {team_location: rank} for the requested poll.
     poll_type: 'ap' or 'cfp'
     """
-    data = _get(ESPN_RANKINGS_URL)
+    data = await _get(ESPN_RANKINGS_URL)
     target_name = "AP Top 25" if poll_type == POLL_AP else "College Football Playoff"
 
     for poll in data.get("rankings", []):
@@ -38,7 +39,7 @@ def fetch_rankings(poll_type: str = POLL_AP) -> dict[str, int]:
 
 # ── SCHEDULE ──────────────────────────────────────────────────────────────────
 
-def fetch_week_games(
+async def fetch_week_games(
     start_date: str,
     end_date: str,
     ranked_teams: dict[str, int],
@@ -46,12 +47,9 @@ def fetch_week_games(
     """
     Fetch all games in date range, filter to those involving at least one
     ranked team, and return structured game dicts.
-
-    start_date / end_date: 'YYYYMMDD'
-    ranked_teams: {team_location: rank}
     """
     params = {"dates": f"{start_date}-{end_date}"}
-    data   = _get(ESPN_SCOREBOARD_URL, params=params)
+    data   = await _get(ESPN_SCOREBOARD_URL, params=params)
 
     games         = []
     seen_espn_ids = set()
@@ -64,7 +62,6 @@ def fetch_week_games(
         comp        = event["competitions"][0]
         competitors = comp["competitors"]
 
-        # FIX (original Schedules bug): use homeAway field, not index position
         home = next((c for c in competitors if c["homeAway"] == "home"), competitors[0])
         away = next((c for c in competitors if c["homeAway"] == "away"), competitors[1])
 
@@ -77,7 +74,6 @@ def fetch_week_games(
         if home_rank is None and away_rank is None:
             continue
 
-        # Parse kickoff time — ESPN returns UTC ISO8601
         raw_time = event.get("date", "")
         try:
             kickoff_utc = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
@@ -86,13 +82,11 @@ def fetch_week_games(
         except (ValueError, AttributeError):
             kickoff_iso = raw_time
 
-        # Broadcast
         try:
             broadcast = comp["broadcasts"][0]["names"][0]
         except (KeyError, IndexError):
             broadcast = "TBD"
 
-        # Odds
         odds       = comp.get("odds", [])
         spread     = ""
         over_under = ""
@@ -103,7 +97,6 @@ def fetch_week_games(
                 if "overUnder" in o and not over_under:
                     over_under = str(o["overUnder"])
 
-        # Status
         status_name = event["status"]["type"]["name"]
         status_map  = {
             "STATUS_SCHEDULED":   "scheduled",
@@ -112,14 +105,12 @@ def fetch_week_games(
         }
         status = status_map.get(status_name, "scheduled")
 
-        # FIX (original Schedules bug): cast scores to int, not string comparison
         try:
             home_score = int(home.get("score", 0) or 0)
             away_score = int(away.get("score", 0) or 0)
         except (TypeError, ValueError):
             home_score = away_score = None
 
-        # FIX: tie handling — if scores are equal at final, mark winner as None
         winner = None
         if status == "final" and home_score is not None and away_score is not None:
             if home_score > away_score:
@@ -127,10 +118,9 @@ def fetch_week_games(
             elif away_score > home_score:
                 winner = away_name
             else:
-                winner = None  # Tie — should not normally happen in CFB
+                winner = None
                 log.warning(
-                    f"Game {espn_id} ({home_name} vs {away_name}) ended in a tie "
-                    f"({home_score}-{away_score}). Winner left as None."
+                    f"Game {espn_id} ({home_name} vs {away_name}) ended in a tie. Winner left as None."
                 )
 
         games.append({
@@ -158,18 +148,16 @@ def fetch_week_games(
 
 # ── LIVE SCORE UPDATE ─────────────────────────────────────────────────────────
 
-def fetch_game_status(espn_game_id: str) -> dict | None:
+async def fetch_game_status(espn_game_id: str) -> dict | None:
     """
     Fetch current status for a single game by ESPN ID.
-    Returns dict with keys: status, home_score, away_score, winner,
-    status_detail, or None on failure.
     """
     try:
         url = (
             f"http://site.api.espn.com/apis/site/v2/sports/football/"
             f"college-football/summary?event={espn_game_id}"
         )
-        data   = _get(url)
+        data   = await _get(url)
         header = data.get("header", {})
         comps  = header.get("competitions", [{}])
         comp   = comps[0] if comps else {}
@@ -190,7 +178,6 @@ def fetch_game_status(espn_game_id: str) -> dict | None:
         home = next((c for c in competitors if c.get("homeAway") == "home"), {})
         away = next((c for c in competitors if c.get("homeAway") == "away"), {})
 
-        # FIX: cast scores to int
         try:
             home_score = int(home.get("score", 0) or 0)
             away_score = int(away.get("score", 0) or 0)
@@ -200,7 +187,6 @@ def fetch_game_status(espn_game_id: str) -> dict | None:
         home_name = home.get("team", {}).get("location", "")
         away_name = away.get("team", {}).get("location", "")
 
-        # FIX: tie handling
         winner = None
         if status == "final":
             if home_score > away_score:
