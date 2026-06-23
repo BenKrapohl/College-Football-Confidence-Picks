@@ -119,7 +119,7 @@ def game_embed(game, player_picks: Optional[list] = None,
             if w == home:
                 score_line = f"**{game['home_score']}** — {game['away_score']}  · {home} wins"
             else:
-                score_line = f"{game['home_score']} — **{game['away_score']}**  · {away} wins"
+                score_line = f"{game['home_score']} — **{game['away_score']}** · {away} wins"
         elif status == "final" and game.get("winner") is None:
             score_line = f"{game['home_score']} — {game['away_score']}  · *Tie*"
         e.add_field(name="Score", value=score_line, inline=False)
@@ -147,13 +147,12 @@ def game_embed(game, player_picks: Optional[list] = None,
             inline=False,
         )
 
-    # FIX #4: pick split now only renders when player_picks is actually provided
     if player_picks is not None and total_players > 0:
         locked       = status != "scheduled"
         home_pickers = [p for p in player_picks if p.get("picked_team") == home]
         away_pickers = [p for p in player_picks if p.get("picked_team") == away]
         home_pct     = round(len(home_pickers) / total_players * 100) if total_players else 0
-        away_pct     = 100 - home_pct
+        away_pct     = round(len(away_pickers) / total_players * 100) if total_players else 0
 
         if locked and picks_reveal:
             home_names = ", ".join(p["display_name"] for p in home_pickers) or "—"
@@ -166,8 +165,9 @@ def game_embed(game, player_picks: Optional[list] = None,
             e.add_field(
                 name="Pick split",
                 value=(
-                    f"{home_pct}%  {bar}  {away_pct}%\n"
-                    f"{home} vs {away}"
+                    f"**{home}**: {len(home_pickers)} picks ({home_pct}%)\n"
+                    f"**{away}**: {len(away_pickers)} picks ({away_pct}%)\n"
+                    f"`{home_pct:>3}% {bar} {away_pct:>3}%`"
                 ),
                 inline=False,
             )
@@ -228,7 +228,7 @@ def standings_week_embed(rows: list, week_number: int) -> discord.Embed:
             continue
         rank_icon = medals[i] if i < 3 else f"`{i+1}.`"
         lines.append(
-            f"{rank_icon} **{r['display_name']}**  "
+            f"{rank_icon} **{r['display_name']}** "
             f"— **{r['points_earned']}** pts  "
             f"· {r['correct_picks']} correct"
             + (f" · {r['forfeited_picks']} missed" if r["forfeited_picks"] else "")
@@ -267,7 +267,6 @@ def log_embed(title: str, description: str, level: str = "info") -> discord.Embe
         title=title,
         description=description,
         color=color_map.get(level, COLOR_GRAY),
-        # FIX: use timezone-aware UTC datetime instead of deprecated utcnow()
         timestamp=datetime.now(tz=timezone.utc),
     )
     return e
