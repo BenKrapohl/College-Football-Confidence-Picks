@@ -15,6 +15,10 @@ CHANNEL_PICKS       = "cfcp-picks"
 CHANNEL_GAMES       = "cfcp-games"
 CHANNEL_STANDINGS   = "cfcp-standings"
 
+# ── Backups ───────────────────────────────────────────────────────────────────
+# Where the bot will locally store database copies
+BACKUP_DIR          = os.path.join(os.path.dirname(__file__), "backups")
+
 # ── ESPN API ──────────────────────────────────────────────────────────────────
 ESPN_SCOREBOARD_URL = (
     "http://site.api.espn.com/apis/site/v2/sports/football/"
@@ -35,15 +39,7 @@ POLL_CFP_LABEL      = "CFP Rankings"
 SEASON_YEAR         = 2026
 
 # ── Refresh intervals (seconds) ──────────────────────────────────────────────
-REFRESH_LIVE_GAME   = 90        # live score updates
-REFRESH_GAMEDAY     = 300       # picks panel on game days
-REFRESH_OFFWEEK     = 21600     # 6 hours between weeks
-REFRESH_STANDINGS   = 300       # standings panel
-
-# ── Notification windows (seconds) ───────────────────────────────────────────
-NOTIF_24HR          = 86400
-NOTIF_30MIN         = 1800
-NOTIF_CHECK_INTERVAL = 900      # scheduler tick every 15 min
+REFRESH_INTERVAL = 900      # scheduler tick every 15 min
 
 # ── Bot behavior ──────────────────────────────────────────────────────────────
 PICKS_REVEAL_DEFAULT    = True   # show who picked what after lock
@@ -75,10 +71,5 @@ def validate_config() -> list[str]:
     if not DISCORD_TOKEN:
         errors.append("DISCORD_TOKEN is not set in .env")
     if GUILD_ID == 0:
-        errors.append("GUILD_ID is not set or is 0 in .env")
-    if ADMIN_ROLE_ID == 0:
-        errors.append(
-            "ADMIN_ROLE_ID is not set or is 0 in .env — "
-            "no one will be able to use admin functions"
-        )
+        errors.append("GUILD_ID is not set or invalid in .env")
     return errors
