@@ -17,14 +17,17 @@ log = logging.getLogger(__name__)
 # ── Single game scoring ─────────────────────────────────────────────────────
 
 async def score_single_game(bot: commands.Bot, game_id: int) -> None:
-    with get_db() as conn:
-        game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+    async with get_db() as conn:
+        async with conn.execute("SELECT * FROM games WHERE id=?", (game_id,)) as cursor:
+            game = await cursor.fetchone()
+            
         if not game or game["status"] != "final":
             return
 
-        picks = conn.execute(
+        async with conn.execute(
             "SELECT * FROM picks WHERE game_id=?", (game_id,)
-        ).fetchall()
+        ) as cursor:
+            picks = await cursor.fetchall()
 
         winner = game["winner"]  
 
@@ -36,7 +39,7 @@ async def score_single_game(bot: commands.Bot, game_id: int) -> None:
             else:
                 is_correct = 1 if pick["picked_team"] == winner else 0
 
-            conn.execute(
+            await conn.execute(
                 "UPDATE picks SET is_correct=?, scored_at=datetime('now') WHERE id=?",
                 (is_correct, pick["id"])
             )
@@ -50,18 +53,19 @@ async def score_single_game(bot: commands.Bot, game_id: int) -> None:
 # ── Weekly score recalculation ───────────────────────────────────────────────
 
 async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
-    players = get_all_scoreable_players()
+    players = await get_all_scoreable_players()
 
-    with get_db() as conn:
+    async with get_db() as conn:
         for player in players:
-            rows = conn.execute(
+            async with conn.execute(
                 """SELECT pk.confidence_points, pk.is_correct, pk.is_forfeit,
                           g.status as g_status, g.winner as g_winner
                    FROM picks pk
                    JOIN games g ON pk.game_id = g.id
                    WHERE pk.player_id=? AND g.week_id=?""",
                 (player["id"], week_id)
-            ).fetchall()
+            ) as cursor:
+                rows = await cursor.fetchall()
 
             points_earned   = 0
             correct_picks   = 0
@@ -92,7 +96,7 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
                 else:
                     wrong_picks += 1
 
-            conn.execute("""
+            await conn.execute("""
                 INSERT INTO weekly_scores(player_id, week_id, points_earned,
                     correct_picks, wrong_picks, forfeited_picks, total_possible)
                 VALUES (?,?,?,?,?,?,?)
@@ -105,11 +109,12 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
             """, (player["id"], week_id, points_earned, correct_picks,
                   wrong_picks, forfeited_picks, total_possible))
 
-        scores = conn.execute("""
+        async with conn.execute("""
             SELECT id, player_id, points_earned, correct_picks
             FROM weekly_scores WHERE week_id=?
             ORDER BY points_earned DESC, correct_picks DESC
-        """, (week_id,)).fetchall()
+        """, (week_id,)) as cursor:
+            scores = await cursor.fetchall()
 
         rank = 0
         prev_key = None
@@ -118,7 +123,7 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
             if key != prev_key:
                 rank += 1
                 prev_key = key
-            conn.execute(
+            await conn.execute(
                 "UPDATE weekly_scores SET weekly_rank=? WHERE id=?",
                 (rank, s["id"])
             )
@@ -132,17 +137,19 @@ async def _refresh_standings(bot: commands.Bot, week_id: int) -> None:
     from cogs.setup import refresh_standings
     from database import get_active_season, get_season_leaderboard
 
-    with get_db() as conn:
-        week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
+    async with get_db() as conn:
+        async with conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)) as cursor:
+            week = await cursor.fetchone()
+            
     if not week:
         return
 
-    season = get_active_season()
+    season = await get_active_season()
     if not season:
         return
 
-    week_rows   = get_week_leaderboard(week_id)
-    season_rows = get_season_leaderboard(season["id"])
+    week_rows   = await get_week_leaderboard(week_id)
+    season_rows = await get_season_leaderboard(season["id"])
 
     week_embed   = standings_week_embed(week_rows, week["week_number"])
     season_embed = standings_season_embed(season_rows, season["year"])
@@ -155,6 +162,8 @@ async def _refresh_standings(bot: commands.Bot, week_id: int) -> None:
 class ScoringCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # FIX #5: API Polling Failsafe state tracking
+        self.consecutive_failures = 0 
         self.score_poller.start()
 
     def cog_unload(self) -> None:
@@ -163,17 +172,18 @@ class ScoringCog(commands.Cog):
     @tasks.loop(seconds=90)
     async def score_poller(self) -> None:
         try:
-            season, week = resolve_current_week()
+            season, week = await resolve_current_week()
             if not week:
                 return
 
-            with get_db() as conn:
-                games = conn.execute(
+            async with get_db() as conn:
+                async with conn.execute(
                     """SELECT * FROM games
                        WHERE week_id=? AND status != 'final'
                        AND is_manually_added=0""",
                     (week["id"],)
-                ).fetchall()
+                ) as cursor:
+                    games = await cursor.fetchall()
 
             from cogs.admin import update_single_game_embed
 
@@ -185,11 +195,11 @@ class ScoringCog(commands.Cog):
                 espn_status = result["status"]
 
                 if espn_status == "final":
-                    elapsed = grace_elapsed_secs(game["id"])
+                    elapsed = await grace_elapsed_secs(game["id"])
                     if elapsed is None:
-                        grace_start(game["id"])
-                        with get_db() as conn:
-                            conn.execute(
+                        await grace_start(game["id"])
+                        async with get_db() as conn:
+                            await conn.execute(
                                 """UPDATE games SET home_score=?, away_score=?
                                    WHERE id=?""",
                                 (result["home_score"], result["away_score"], game["id"])
@@ -199,14 +209,14 @@ class ScoringCog(commands.Cog):
                     if elapsed < ESPN_FINAL_GRACE_SECS:
                         continue
 
-                    with get_db() as conn:
-                        conn.execute(
+                    async with get_db() as conn:
+                        await conn.execute(
                             """UPDATE games SET status='final', home_score=?,
                                away_score=?, winner=? WHERE id=?""",
                             (result["home_score"], result["away_score"],
                              result["winner"], game["id"])
                         )
-                    grace_clear(game["id"])
+                    await grace_clear(game["id"])
                     await update_single_game_embed(self.bot, game["id"])
                     await score_single_game(self.bot, game["id"])
 
@@ -221,8 +231,8 @@ class ScoringCog(commands.Cog):
                     )
 
                 elif espn_status == "in_progress" and game["status"] != "in_progress":
-                    with get_db() as conn:
-                        conn.execute(
+                    async with get_db() as conn:
+                        await conn.execute(
                             """UPDATE games SET status='in_progress', home_score=?,
                                away_score=? WHERE id=?""",
                             (result["home_score"], result["away_score"], game["id"])
@@ -230,41 +240,72 @@ class ScoringCog(commands.Cog):
                     await update_single_game_embed(self.bot, game["id"])
 
                 elif espn_status == "in_progress":
-                    with get_db() as conn:
-                        conn.execute(
+                    async with get_db() as conn:
+                        await conn.execute(
                             "UPDATE games SET home_score=?, away_score=? WHERE id=?",
                             (result["home_score"], result["away_score"], game["id"])
                         )
                     await update_single_game_embed(self.bot, game["id"])
 
             await self._check_week_complete(week["id"])
+            
+            # If the loop finished successfully, reset the failure counter and polling interval
+            if self.consecutive_failures > 0:
+                self.consecutive_failures = 0
+                self.score_poller.change_interval(seconds=90)
+                await log_to_channel(
+                    self.bot, 
+                    "✅ ESPN API connection successfully restored.", 
+                    title="API Restored", level="success"
+                )
 
         except Exception as exc:
-            log.error(f"score_poller error: {exc}", exc_info=True)
+            self.consecutive_failures += 1
+            log.error(f"score_poller error (attempt {self.consecutive_failures}): {exc}", exc_info=True)
+            
+            # Exponential backoff: 90s, 180s, 360s, maxing out at 1 hour (3600 seconds)
+            new_interval = min(90 * (2 ** (self.consecutive_failures - 1)), 3600)
+            self.score_poller.change_interval(seconds=new_interval)
+            
+            if self.consecutive_failures == 3:
+                await log_to_channel(
+                    self.bot,
+                    f"🚨 **ESPN API Polling has failed 3 consecutive times.**\n"
+                    f"The internal polling task has temporarily backed off to prevent rate limiting.\n"
+                    f"Checking again in **{int(new_interval/60)} minutes**.\n"
+                    f"Error: `{exc}`",
+                    title="API Failure Alert", level="error"
+                )
 
     @score_poller.before_loop
     async def before_score_poller(self) -> None:
         await self.bot.wait_until_ready()
 
     async def _check_week_complete(self, week_id: int) -> None:
-        with get_db() as conn:
-            week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
+        async with get_db() as conn:
+            async with conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)) as cursor:
+                week = await cursor.fetchone()
+                
             if not week or week["recap_sent"]:
                 return
 
-            total = conn.execute(
+            async with conn.execute(
                 "SELECT COUNT(*) as c FROM games WHERE week_id=?", (week_id,)
-            ).fetchone()["c"]
-            final = conn.execute(
+            ) as cursor:
+                total = (await cursor.fetchone())["c"]
+                
+            async with conn.execute(
                 "SELECT COUNT(*) as c FROM games WHERE week_id=? AND status='final'",
                 (week_id,)
-            ).fetchone()["c"]
+            ) as cursor:
+                final = (await cursor.fetchone())["c"]
 
-            pending_manual = conn.execute(
+            async with conn.execute(
                 """SELECT COUNT(*) as c FROM games
                    WHERE week_id=? AND is_manually_added=1 AND status != 'final'""",
                 (week_id,)
-            ).fetchone()["c"]
+            ) as cursor:
+                pending_manual = (await cursor.fetchone())["c"]
 
         if total == 0:
             return
@@ -272,8 +313,8 @@ class ScoringCog(commands.Cog):
         if final == total:
             from cogs.notifications import send_weekly_recap
             await send_weekly_recap(self.bot, week_id)
-            with get_db() as conn:
-                conn.execute(
+            async with get_db() as conn:
+                await conn.execute(
                     "UPDATE weeks SET recap_sent=1, is_scored=1 WHERE id=?",
                     (week_id,)
                 )
@@ -284,9 +325,10 @@ class ScoringCog(commands.Cog):
             )
         elif pending_manual > 0 and final == (total - pending_manual):
             reminder_key = f"manual_pending_reminder_week_{week_id}"
-            if not config_get(reminder_key):
+            reminder_val = await config_get(reminder_key)
+            if not reminder_val:
                 from database import config_set
-                config_set(reminder_key, "1")
+                await config_set(reminder_key, "1")
                 await log_to_channel(
                     self.bot,
                     f"⚠️ Week {week['week_number']}: all ESPN-tracked games are "
