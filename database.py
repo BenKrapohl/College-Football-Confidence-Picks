@@ -1,35 +1,35 @@
-import sqlite3
+import aiosqlite
 import os
 import logging
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
 log = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cfcp.db")
 
 
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+@asynccontextmanager
+async def get_db():
+    conn = await aiosqlite.connect(DB_PATH)
+    conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA journal_mode=WAL")
+    await conn.execute("PRAGMA foreign_keys=ON")
     # FIX #6: Use UTC for all timestamps — avoids server-timezone drift
-    conn.execute("PRAGMA timezone='utc'")
+    await conn.execute("PRAGMA timezone='utc'")
     try:
         yield conn
-        conn.commit()
+        await conn.commit()
     except Exception:
-        conn.rollback()
+        await conn.rollback()
         raise
     finally:
-        conn.close()
+        await conn.close()
 
 
-def init_db():
+async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with get_db() as conn:
-        conn.executescript("""
+    async with get_db() as conn:
+        await conn.executescript("""
             -- ── PLAYERS ──────────────────────────────────────────────
             CREATE TABLE IF NOT EXISTS players (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,22 +184,22 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_weekly_week    ON weekly_scores(week_id);
             CREATE INDEX IF NOT EXISTS idx_notif_player   ON notifications_sent(player_id, week_id);
         """)
-    # FIX #27: Use logger instead of print
     log.info(f"Database initialized at {DB_PATH}")
 
 
 # ── CONFIG HELPERS ────────────────────────────────────────────────────────────
 
-def config_get(key: str, default=None):
-    with get_db() as conn:
-        row = conn.execute(
+async def config_get(key: str, default=None):
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT value FROM bot_config WHERE key = ?", (key,)
-        ).fetchone()
-        return row["value"] if row else default
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row["value"] if row else default
 
-def config_set(key: str, value: str):
-    with get_db() as conn:
-        conn.execute("""
+async def config_set(key: str, value: str):
+    async with get_db() as conn:
+        await conn.execute("""
             INSERT INTO bot_config(key, value, updated_at)
             VALUES (?, ?, datetime('now'))
             ON CONFLICT(key) DO UPDATE SET
@@ -210,99 +210,107 @@ def config_set(key: str, value: str):
 
 # ── SEASON HELPERS ────────────────────────────────────────────────────────────
 
-def get_active_season():
-    with get_db() as conn:
-        return conn.execute(
+async def get_active_season():
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM seasons WHERE is_active = 1 ORDER BY year DESC LIMIT 1"
-        ).fetchone()
+        ) as cursor:
+            return await cursor.fetchone()
 
-def end_active_season():
+async def end_active_season():
     """Mark the current season as ended. Used by the End Season admin flow."""
-    with get_db() as conn:
-        conn.execute(
+    async with get_db() as conn:
+        await conn.execute(
             "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
         )
 
-def create_season(year: int, poll_type: str = "ap"):
+async def create_season(year: int, poll_type: str = "ap"):
     """Deactivate any running season and create a new one."""
-    with get_db() as conn:
-        conn.execute(
+    async with get_db() as conn:
+        await conn.execute(
             "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
         )
-        conn.execute(
+        await conn.execute(
             "INSERT OR IGNORE INTO seasons(year, poll_type, is_active) VALUES (?,?,1)",
             (year, poll_type),
         )
 
-# FIX #7: get_current_week now uses date-range matching with fallback
-def get_current_week(season_id: int):
+async def get_current_week(season_id: int):
     """
     Returns the week whose start_date <= today <= end_date.
     Falls back to the most recently loaded week if no date-range match
     (handles the case where an admin loads next week early).
     """
-    with get_db() as conn:
+    async with get_db() as conn:
         # Try date-range match first
-        matched = conn.execute("""
+        async with conn.execute("""
             SELECT * FROM weeks
             WHERE season_id = ?
               AND start_date <= date('now')
               AND end_date   >= date('now')
             LIMIT 1
-        """, (season_id,)).fetchone()
+        """, (season_id,)) as cursor:
+            matched = await cursor.fetchone()
+            
         if matched:
             return matched
+            
         # Fallback: most recently loaded week (covers pre-season / off-week)
-        return conn.execute(
+        async with conn.execute(
             "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
             (season_id,)
-        ).fetchone()
+        ) as cursor:
+            return await cursor.fetchone()
 
-def get_week_by_number(season_id: int, week_number: int):
-    with get_db() as conn:
-        return conn.execute(
+async def get_week_by_number(season_id: int, week_number: int):
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM weeks WHERE season_id = ? AND week_number = ?",
             (season_id, week_number)
-        ).fetchone()
+        ) as cursor:
+            return await cursor.fetchone()
 
-def get_latest_week(season_id: int):
+async def get_latest_week(season_id: int):
     """Always returns the most recently inserted week regardless of dates."""
-    with get_db() as conn:
-        return conn.execute(
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM weeks WHERE season_id=? ORDER BY week_number DESC LIMIT 1",
             (season_id,)
-        ).fetchone()
+        ) as cursor:
+            return await cursor.fetchone()
 
 
 # ── PLAYER HELPERS ────────────────────────────────────────────────────────────
 
-def get_player_by_discord_id(discord_id: str):
-    with get_db() as conn:
-        return conn.execute(
+async def get_player_by_discord_id(discord_id: str):
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM players WHERE discord_id = ?", (discord_id,)
-        ).fetchone()
+        ) as cursor:
+            return await cursor.fetchone()
 
-def get_all_active_players():
-    with get_db() as conn:
-        return conn.execute(
+async def get_all_active_players():
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM players WHERE status = 'active' ORDER BY display_name"
-        ).fetchall()
+        ) as cursor:
+            return await cursor.fetchall()
 
-# FIX #10: Separate helper that includes withdrawn players for scoring
-def get_all_scoreable_players():
+async def get_all_scoreable_players():
     """Returns active + withdrawn players — both need their scores maintained."""
-    with get_db() as conn:
-        return conn.execute(
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM players WHERE status IN ('active', 'withdrawn') "
             "ORDER BY display_name"
-        ).fetchall()
+        ) as cursor:
+            return await cursor.fetchall()
 
 
 # ── PICK HELPERS ──────────────────────────────────────────────────────────────
 
-def get_player_picks_for_week(player_id: int, week_id: int):
-    with get_db() as conn:
-        return conn.execute("""
+async def get_player_picks_for_week(player_id: int, week_id: int):
+    async with get_db() as conn:
+        async with conn.execute("""
             SELECT p.*, g.home_team, g.away_team, g.home_rank, g.away_rank,
                    g.kickoff_time, g.channel, g.spread, g.status as game_status,
                    g.winner, g.espn_link
@@ -310,19 +318,21 @@ def get_player_picks_for_week(player_id: int, week_id: int):
             JOIN games g ON p.game_id = g.id
             WHERE p.player_id = ? AND g.week_id = ?
             ORDER BY p.confidence_points DESC
-        """, (player_id, week_id)).fetchall()
+        """, (player_id, week_id)) as cursor:
+            return await cursor.fetchall()
 
-def get_used_slots_for_week(player_id: int, week_id: int):
-    with get_db() as conn:
-        rows = conn.execute("""
+async def get_used_slots_for_week(player_id: int, week_id: int):
+    async with get_db() as conn:
+        async with conn.execute("""
             SELECT confidence_points FROM pick_slots
             WHERE player_id = ? AND week_id = ?
-        """, (player_id, week_id)).fetchall()
-        return {r["confidence_points"] for r in rows}
+        """, (player_id, week_id)) as cursor:
+            rows = await cursor.fetchall()
+            return {r["confidence_points"] for r in rows}
 
-def get_unpicked_games_for_player(player_id: int, week_id: int):
-    with get_db() as conn:
-        return conn.execute("""
+async def get_unpicked_games_for_player(player_id: int, week_id: int):
+    async with get_db() as conn:
+        async with conn.execute("""
             SELECT g.* FROM games g
             WHERE g.week_id = ?
               AND g.status = 'scheduled'
@@ -331,14 +341,15 @@ def get_unpicked_games_for_player(player_id: int, week_id: int):
                   WHERE player_id = ? AND is_forfeit = 0
               )
             ORDER BY g.kickoff_time
-        """, (week_id, player_id)).fetchall()
+        """, (week_id, player_id)) as cursor:
+            return await cursor.fetchall()
 
 
 # ── SCORING HELPERS ───────────────────────────────────────────────────────────
 
-def get_season_leaderboard(season_id: int):
-    with get_db() as conn:
-        return conn.execute("""
+async def get_season_leaderboard(season_id: int):
+    async with get_db() as conn:
+        async with conn.execute("""
             SELECT
                 pl.id,
                 pl.display_name,
@@ -358,11 +369,12 @@ def get_season_leaderboard(season_id: int):
             WHERE pl.status IN ('active', 'withdrawn')
             GROUP BY pl.id
             ORDER BY total_points DESC, total_correct DESC
-        """, (season_id,)).fetchall()
+        """, (season_id,)) as cursor:
+            return await cursor.fetchall()
 
-def get_week_leaderboard(week_id: int):
-    with get_db() as conn:
-        return conn.execute("""
+async def get_week_leaderboard(week_id: int):
+    async with get_db() as conn:
+        async with conn.execute("""
             SELECT
                 pl.display_name,
                 pl.status,
@@ -376,39 +388,43 @@ def get_week_leaderboard(week_id: int):
                    ON ws.player_id = pl.id AND ws.week_id = ?
             WHERE pl.status IN ('active', 'withdrawn')
             ORDER BY points_earned DESC, correct_picks DESC
-        """, (week_id,)).fetchall()
+        """, (week_id,)) as cursor:
+            return await cursor.fetchall()
 
 
 # ── GRACE PERIOD HELPERS (FIX #11) ───────────────────────────────────────────
 
-def grace_start(game_id: int):
+async def grace_start(game_id: int):
     """Record that a game entered the scoring grace period."""
-    with get_db() as conn:
-        conn.execute(
+    async with get_db() as conn:
+        await conn.execute(
             "INSERT OR IGNORE INTO scoring_grace(game_id) VALUES (?)",
             (game_id,)
         )
 
-def grace_elapsed_secs(game_id: int) -> float | None:
+async def grace_elapsed_secs(game_id: int) -> float | None:
     """
     Returns seconds since grace started, or None if not in grace period.
     """
-    with get_db() as conn:
-        row = conn.execute(
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT grace_started_at FROM scoring_grace WHERE game_id=?",
             (game_id,)
-        ).fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
+            
     if not row:
         return None
+        
     from datetime import datetime, timezone
     started = datetime.fromisoformat(row["grace_started_at"]).replace(
         tzinfo=timezone.utc
     )
     return (datetime.now(tz=timezone.utc) - started).total_seconds()
 
-def grace_clear(game_id: int):
+async def grace_clear(game_id: int):
     """Remove a game from the grace period table after scoring."""
-    with get_db() as conn:
-        conn.execute(
+    async with get_db() as conn:
+        await conn.execute(
             "DELETE FROM scoring_grace WHERE game_id=?", (game_id,)
         )
