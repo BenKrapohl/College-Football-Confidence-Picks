@@ -19,8 +19,8 @@ ET  = ZoneInfo("America/New_York")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _get_player(discord_id: str):
-    return get_player_by_discord_id(str(discord_id))
+async def _get_player(discord_id: str):
+    return await get_player_by_discord_id(str(discord_id))
 
 
 def _game_is_locked(game: dict) -> bool:
@@ -33,31 +33,79 @@ def _game_is_locked(game: dict) -> bool:
         return False
 
 
+async def _get_picked_ids(player_id: int, week_id: int) -> set:
+    """Helper to fetch picked IDs before initializing synchronous UI views."""
+    async with get_db() as conn:
+        async with conn.execute(
+            """SELECT game_id FROM picks
+               WHERE player_id=? AND is_forfeit=0
+               AND game_id IN (SELECT id FROM games WHERE week_id=?)""",
+            (player_id, week_id)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {r["game_id"] for r in rows}
+
+
+async def _get_slot_data(player_id: int, week_id: int, game_id: int):
+    """Helper to fetch occupant slot data before initializing synchronous UI views."""
+    used_slots = await get_used_slots_for_week(player_id, week_id)
+    
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT confidence_points FROM picks WHERE player_id=? AND game_id=?",
+            (player_id, game_id)
+        ) as cursor:
+            existing = await cursor.fetchone()
+        current_slot = existing["confidence_points"] if existing else None
+
+        occupants = {}
+        async with conn.execute(
+            """SELECT ps.confidence_points, g.home_team, g.away_team, pk.picked_team
+               FROM pick_slots ps
+               JOIN games g ON ps.game_id = g.id
+               JOIN picks pk ON pk.player_id=ps.player_id AND pk.game_id=ps.game_id
+               WHERE ps.player_id=? AND ps.week_id=?""",
+            (player_id, week_id)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for r in rows:
+                occupants[r["confidence_points"]] = r
+
+    return used_slots, current_slot, occupants
+
+
 async def _refresh_picks_hub(bot: commands.Bot) -> None:
     from cogs.setup import refresh_picks_hub
-    season, week = resolve_current_week()
+    season, week = await resolve_current_week()
     if not week:
         await refresh_picks_hub(bot)
         return
-    with get_db() as conn:
-        game_rows = conn.execute(
+        
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
             (week["id"],)
-        ).fetchall()
-    players     = get_all_active_players()
+        ) as cursor:
+            game_rows = await cursor.fetchall()
+            
+    players = await get_all_active_players()
     player_list = []
-    with get_db() as conn:
+    
+    async with get_db() as conn:
         for p in players:
-            count = conn.execute(
+            async with conn.execute(
                 """SELECT COUNT(*) as c FROM picks pk
                    JOIN games g ON pk.game_id = g.id
                    WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0""",
                 (p["id"], week["id"])
-            ).fetchone()["c"]
-            player_list.append({
-                **dict(p),
-                "submitted": count >= week["game_count"]
-            })
+            ) as cursor:
+                row = await cursor.fetchone()
+                count = row["c"]
+                player_list.append({
+                    **dict(p),
+                    "submitted": count >= week["game_count"]
+                })
+                
     await refresh_picks_hub(
         bot,
         week=dict(week),
@@ -80,7 +128,7 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
         username   = str(interaction.user)
         name       = self.display_name.value.strip()
 
-        existing = _get_player(discord_id)
+        existing = await _get_player(discord_id)
         if existing:
             status = existing["status"]
             if status == "active":
@@ -89,8 +137,8 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
                 )
                 return
             if status == "withdrawn":
-                with get_db() as conn:
-                    conn.execute(
+                async with get_db() as conn:
+                    await conn.execute(
                         "UPDATE players SET status='active', display_name=? WHERE discord_id=?",
                         (name, discord_id)
                     )
@@ -108,12 +156,12 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
                 )
                 return
 
-        with get_db() as conn:
-            pending = conn.execute(
-                "SELECT id FROM registration_requests "
-                "WHERE discord_id=? AND status='pending'",
+        async with get_db() as conn:
+            async with conn.execute(
+                "SELECT id FROM registration_requests WHERE discord_id=? AND status='pending'",
                 (discord_id,)
-            ).fetchone()
+            ) as cursor:
+                pending = await cursor.fetchone()
 
         if pending:
             await interaction.response.send_message(
@@ -121,11 +169,13 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
             )
             return
 
-        with get_db() as conn:
-            taken = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 "SELECT id FROM players WHERE LOWER(display_name)=LOWER(?)",
                 (name,)
-            ).fetchone()
+            ) as cursor:
+                taken = await cursor.fetchone()
+                
         if taken:
             await interaction.response.send_message(
                 f"The display name **{name}** is already taken. "
@@ -134,14 +184,14 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
             )
             return
 
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 """INSERT INTO registration_requests
                    (discord_id, discord_username, display_name, status)
                    VALUES (?,?,?,'pending')""",
                 (discord_id, username, name),
             )
-            conn.execute(
+            await conn.execute(
                 """INSERT OR IGNORE INTO players
                    (discord_id, discord_username, display_name, status)
                    VALUES (?,?,?,'pending')""",
@@ -161,19 +211,21 @@ class RegistrationModal(discord.ui.Modal, title="Join CFCP"):
 
 async def _notify_admins_registration(bot: commands.Bot, discord_id: str,
                                       username: str, display_name: str) -> None:
-    ch_id = config_get("channel_logs")
+    ch_id = await config_get("channel_logs")
     if not ch_id:
         return
     ch = bot.get_channel(int(ch_id))
     if not isinstance(ch, discord.TextChannel):
         return
 
-    with get_db() as conn:
-        req = conn.execute(
+    async with get_db() as conn:
+        async with conn.execute(
             "SELECT id FROM registration_requests "
             "WHERE discord_id=? ORDER BY id DESC LIMIT 1",
             (discord_id,)
-        ).fetchone()
+        ) as cursor:
+            req = await cursor.fetchone()
+            
     if not req:
         return
 
@@ -205,16 +257,16 @@ class ApprovalView(discord.ui.View):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
-        season, week = resolve_current_week()
+        season, week = await resolve_current_week()
         joined_week  = week["week_number"] if week else None
 
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 """UPDATE players SET status='active', joined_week=?
                    WHERE discord_id=?""",
                 (joined_week, self.discord_id),
             )
-            conn.execute(
+            await conn.execute(
                 """UPDATE registration_requests SET status='approved',
                    reviewed_at=datetime('now'), reviewed_by=?
                    WHERE id=?""",
@@ -243,7 +295,7 @@ class ApprovalView(discord.ui.View):
                 "A mention has been posted in #cfcp-picks instead.",
                 title="DM failed", level="warning",
             )
-            picks_ch_id = config_get("channel_picks")
+            picks_ch_id = await config_get("channel_picks")
             if picks_ch_id:
                 picks_ch = self.bot.get_channel(int(picks_ch_id))
                 if isinstance(picks_ch, discord.TextChannel):
@@ -275,13 +327,13 @@ class ApprovalView(discord.ui.View):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 """UPDATE players SET status='denied'
                    WHERE discord_id=? AND status='pending'""",
                 (self.discord_id,),
             )
-            conn.execute(
+            await conn.execute(
                 """UPDATE registration_requests SET status='denied',
                    reviewed_at=datetime('now'), reviewed_by=?
                    WHERE id=?""",
@@ -321,10 +373,10 @@ class ApprovalView(discord.ui.View):
 
 # ── Picks submission flow ──────────────────────────────────────────────────────
 
-def _build_picks_embed(player_id: int, week: dict,
-                       games: list, title: str = "Your picks") -> discord.Embed:
-    with get_db() as conn:
-        existing = conn.execute(
+async def _build_picks_embed(player_id: int, week: dict,
+                             games: list, title: str = "Your picks") -> discord.Embed:
+    async with get_db() as conn:
+        async with conn.execute(
             """SELECT pk.game_id, pk.picked_team, pk.confidence_points,
                       g.home_team, g.away_team, g.kickoff_time, g.home_rank,
                       g.away_rank, g.status as game_status
@@ -333,7 +385,8 @@ def _build_picks_embed(player_id: int, week: dict,
                WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0
                ORDER BY pk.confidence_points DESC""",
             (player_id, week["id"])
-        ).fetchall()
+        ) as cursor:
+            existing = await cursor.fetchall()
 
     picked_ids = {r["game_id"] for r in existing}
     remaining  = [g for g in games if g["id"] not in picked_ids
@@ -387,29 +440,20 @@ def _build_picks_embed(player_id: int, week: dict,
 
 class PicksHubEphemeralView(discord.ui.View):
     def __init__(self, bot: commands.Bot, player_id: int,
-                 week: dict, games: list):
+                 week: dict, games: list, picked_ids: set):
         super().__init__(timeout=300)
-        self.bot       = bot
-        self.player_id = player_id
-        self.week      = week
-        self.games     = games
+        self.bot        = bot
+        self.player_id  = player_id
+        self.week       = week
+        self.games      = games
+        self.picked_ids = picked_ids
         self._rebuild_select()
 
     def _rebuild_select(self) -> None:
         self.clear_items()
 
-        with get_db() as conn:
-            picked_ids = {
-                r["game_id"] for r in conn.execute(
-                    """SELECT game_id FROM picks
-                       WHERE player_id=? AND is_forfeit=0
-                       AND game_id IN (SELECT id FROM games WHERE week_id=?)""",
-                    (self.player_id, self.week["id"])
-                ).fetchall()
-            }
-
         available = [g for g in self.games
-                     if g["id"] not in picked_ids and not _game_is_locked(g)]
+                     if g["id"] not in self.picked_ids and not _game_is_locked(g)]
 
         if available:
             options = []
@@ -452,9 +496,8 @@ class PicksHubEphemeralView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _on_close(self, interaction: discord.Interaction) -> None:
-        # Check if the player has fully submitted their board, if so DM receipt
-        with get_db() as conn:
-            picks = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 """SELECT pk.picked_team, pk.confidence_points,
                           g.home_team, g.away_team
                    FROM picks pk
@@ -462,7 +505,8 @@ class PicksHubEphemeralView(discord.ui.View):
                    WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0
                    ORDER BY pk.confidence_points DESC""",
                 (self.player_id, self.week["id"])
-            ).fetchall()
+            ) as cursor:
+                picks = await cursor.fetchall()
 
         if len(picks) == self.week["game_count"] and self.week["game_count"] > 0:
             lines = [
@@ -476,7 +520,7 @@ class PicksHubEphemeralView(discord.ui.View):
                 + "\n".join(lines) +
                 "\n\n*You can still edit these in the server until each game's kickoff.*"
             )
-            player = _get_player(str(interaction.user.id))
+            player = await _get_player(str(interaction.user.id))
             if player and player["dm_notifications"]:
                 await send_dm(self.bot, player["discord_id"], receipt)
 
@@ -552,31 +596,35 @@ class TeamSelectView(discord.ui.View):
     async def _pick_away(self, interaction: discord.Interaction) -> None:
         await self._pick_team(interaction, self.game["away_team"])
 
-    async def _pick_team(self, interaction: discord.Interaction,
-                         team: str) -> None:
+    async def _pick_team(self, interaction: discord.Interaction, team: str) -> None:
         if _game_is_locked(self.game):
             await interaction.response.send_message(
                 "This game has already kicked off — picks are locked.",
                 ephemeral=True,
             )
             return
-        view  = SlotSelectView(
-            self.bot, self.player_id, self.week,
-            self.games, self.game, team
+            
+        used_slots, current_slot, occupants = await _get_slot_data(
+            self.player_id, self.week["id"], self.game["id"]
         )
-        embed = _build_slot_embed(self.player_id, self.week, self.game, team)
+        view = SlotSelectView(
+            self.bot, self.player_id, self.week, self.games, 
+            self.game, team, used_slots, current_slot, occupants
+        )
+        embed = await _build_slot_embed(self.player_id, self.week, self.game, team)
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _go_back(self, interaction: discord.Interaction) -> None:
+        picked_ids = await _get_picked_ids(self.player_id, self.week["id"])
         hub_view = PicksHubEphemeralView(
-            self.bot, self.player_id, self.week, self.games
+            self.bot, self.player_id, self.week, self.games, picked_ids
         )
-        embed = _build_picks_embed(self.player_id, self.week, self.games)
+        embed = await _build_picks_embed(self.player_id, self.week, self.games)
         await interaction.response.edit_message(embed=embed, view=hub_view)
 
 
-def _build_slot_embed(player_id: int, week: dict,
-                      game: dict, picked_team: str) -> discord.Embed:
+async def _build_slot_embed(player_id: int, week: dict,
+                            game: dict, picked_team: str) -> discord.Embed:
     total_games = week["game_count"]
 
     e = discord.Embed(
@@ -586,20 +634,19 @@ def _build_slot_embed(player_id: int, week: dict,
         color=COLOR_GREEN,
     )
 
-    with get_db() as conn:
-        slot_map = {
-            r["confidence_points"]: r
-            for r in conn.execute(
-                """SELECT ps.confidence_points, g.home_team, g.away_team,
-                          pk.picked_team, g.status as game_status
-                   FROM pick_slots ps
-                   JOIN games g ON ps.game_id = g.id
-                   JOIN picks pk ON pk.player_id = ps.player_id
-                                AND pk.game_id   = ps.game_id
-                   WHERE ps.player_id=? AND ps.week_id=?""",
-                (player_id, week["id"])
-            ).fetchall()
-        }
+    async with get_db() as conn:
+        async with conn.execute(
+            """SELECT ps.confidence_points, g.home_team, g.away_team,
+                      pk.picked_team, g.status as game_status
+               FROM pick_slots ps
+               JOIN games g ON ps.game_id = g.id
+               JOIN picks pk ON pk.player_id = ps.player_id
+                            AND pk.game_id   = ps.game_id
+               WHERE ps.player_id=? AND ps.week_id=?""",
+            (player_id, week["id"])
+        ) as cursor:
+            rows = await cursor.fetchall()
+            slot_map = {r["confidence_points"]: r for r in rows}
 
     lines = []
     for slot in range(total_games, 0, -1):
@@ -625,7 +672,8 @@ def _build_slot_embed(player_id: int, week: dict,
 
 class SlotSelectView(discord.ui.View):
     def __init__(self, bot: commands.Bot, player_id: int, week: dict,
-                 games: list, game: dict, picked_team: str):
+                 games: list, game: dict, picked_team: str, 
+                 used_slots: set, current_slot: Optional[int], occupants: dict):
         super().__init__(timeout=300)
         self.bot         = bot
         self.player_id   = player_id
@@ -633,34 +681,13 @@ class SlotSelectView(discord.ui.View):
         self.games       = games
         self.game        = game
         self.picked_team = picked_team
+        self.current_slot = current_slot
 
-        used_slots  = get_used_slots_for_week(player_id, week["id"])
         total_games = week["game_count"]
-
-        with get_db() as conn:
-            existing = conn.execute(
-                "SELECT confidence_points FROM picks "
-                "WHERE player_id=? AND game_id=?",
-                (player_id, game["id"])
-            ).fetchone()
-        self.current_slot: Optional[int] = (
-            existing["confidence_points"] if existing else None
-        )
-
         options = []
         for slot in range(total_games, 0, -1):
             if slot in used_slots and slot != self.current_slot:
-                with get_db() as conn:
-                    occupant = conn.execute(
-                        """SELECT g.home_team, g.away_team, pk.picked_team
-                           FROM pick_slots ps
-                           JOIN games g ON ps.game_id = g.id
-                           JOIN picks pk ON pk.player_id=ps.player_id
-                                        AND pk.game_id=ps.game_id
-                           WHERE ps.player_id=? AND ps.week_id=?
-                             AND ps.confidence_points=?""",
-                        (player_id, week["id"], slot)
-                    ).fetchone()
+                occupant = occupants.get(slot)
                 desc = (
                     f"Override: {occupant['picked_team']}"
                     f" ({occupant['home_team']} vs {occupant['away_team']})"[:100]
@@ -755,11 +782,15 @@ class OverrideConfirmView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction,
                      button: discord.ui.Button) -> None:
+        used_slots, current_slot, occupants = await _get_slot_data(
+            self.player_id, self.week["id"], self.game["id"]
+        )
         view  = SlotSelectView(
             self.bot, self.player_id, self.week,
-            self.games, self.game, self.picked_team
+            self.games, self.game, self.picked_team,
+            used_slots, current_slot, occupants
         )
-        embed = _build_slot_embed(
+        embed = await _build_slot_embed(
             self.player_id, self.week, self.game, self.picked_team
         )
         await interaction.response.edit_message(embed=embed, view=view)
@@ -769,58 +800,74 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                      player_id: int, week: dict, games: list,
                      game: dict, picked_team: str, slot: int,
                      override: bool = False) -> None:
-    if _game_is_locked(game):
+    
+    # FIX #2: Absolute Backend Timestamp Verification
+    # Instead of relying on the cached game dictionary passed from the UI,
+    # we explicitly query the database for the exact status and kickoff time 
+    # at the exact millisecond the user clicks submit.
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT status, kickoff_time FROM games WHERE id=?", 
+            (game["id"],)
+        ) as cursor:
+            live_game = await cursor.fetchone()
+
+    # Reject the payload if the game doesn't exist or if it has kicked off.
+    if not live_game or _game_is_locked(dict(live_game)):
         await interaction.response.send_message(
-            "This game has kicked off — pick is now locked.", ephemeral=True
+            "🛑 This game has already kicked off. Your pick has been rejected and the game is locked.", 
+            ephemeral=True
         )
         return
 
-    with get_db() as conn:
+    async with get_db() as conn:
         if override:
-            displaced = conn.execute(
+            async with conn.execute(
                 """SELECT ps.game_id FROM pick_slots ps
                    WHERE ps.player_id=? AND ps.week_id=? AND ps.confidence_points=?""",
                 (player_id, week["id"], slot)
-            ).fetchone()
+            ) as cursor:
+                displaced = await cursor.fetchone()
+                
             if displaced:
-                conn.execute(
+                await conn.execute(
                     "DELETE FROM picks WHERE player_id=? AND game_id=?",
                     (player_id, displaced["game_id"])
                 )
-                conn.execute(
+                await conn.execute(
                     "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
                     "AND confidence_points=?",
                     (player_id, week["id"], slot)
                 )
 
-        existing_same_game = conn.execute(
-            "SELECT id, confidence_points FROM picks "
-            "WHERE player_id=? AND game_id=?",
+        async with conn.execute(
+            "SELECT id, confidence_points FROM picks WHERE player_id=? AND game_id=?",
             (player_id, game["id"])
-        ).fetchone()
+        ) as cursor:
+            existing_same_game = await cursor.fetchone()
 
         if existing_same_game:
             old_slot = existing_same_game["confidence_points"]
-            conn.execute(
+            await conn.execute(
                 "UPDATE picks SET picked_team=?, confidence_points=?, "
                 "submitted_at=datetime('now') "
                 "WHERE player_id=? AND game_id=?",
                 (picked_team, slot, player_id, game["id"])
             )
-            conn.execute(
+            await conn.execute(
                 "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
                 "AND confidence_points=?",
                 (player_id, week["id"], old_slot)
             )
         else:
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO picks(player_id, game_id, picked_team,
                    confidence_points, submitted_at)
                    VALUES (?,?,?,?,datetime('now'))""",
                 (player_id, game["id"], picked_team, slot)
             )
 
-        conn.execute(
+        await conn.execute(
             """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
                VALUES (?,?,?,?)
                ON CONFLICT(player_id, week_id, confidence_points)
@@ -828,8 +875,9 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
             (player_id, week["id"], slot, game["id"])
         )
 
-    hub_view = PicksHubEphemeralView(bot, player_id, week, games)
-    embed    = _build_picks_embed(player_id, week, games)
+    picked_ids = await _get_picked_ids(player_id, week["id"])
+    hub_view = PicksHubEphemeralView(bot, player_id, week, games, picked_ids)
+    embed    = await _build_picks_embed(player_id, week, games)
     await interaction.response.edit_message(embed=embed, view=hub_view)
     await _refresh_picks_hub(bot)
 
@@ -838,25 +886,29 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
 
 async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
     from database import get_all_scoreable_players
-    players = get_all_scoreable_players()
+    players = await get_all_scoreable_players()
 
-    with get_db() as conn:
-        week = conn.execute("SELECT game_count FROM weeks WHERE id=?", (week_id,)).fetchone()
+    async with get_db() as conn:
+        async with conn.execute("SELECT game_count FROM weeks WHERE id=?", (week_id,)) as cursor:
+            week = await cursor.fetchone()
         total = week["game_count"] if week else 1
 
-        all_slots = conn.execute(
+        async with conn.execute(
             "SELECT player_id, confidence_points FROM pick_slots WHERE week_id=?", 
             (week_id,)
-        ).fetchall()
+        ) as cursor:
+            all_slots = await cursor.fetchall()
         
         used_slots_map = {}
         for r in all_slots:
             used_slots_map.setdefault(r["player_id"], set()).add(r["confidence_points"])
 
-        all_picks = conn.execute(
+        async with conn.execute(
             "SELECT player_id FROM picks WHERE game_id=?", 
             (game["id"],)
-        ).fetchall()
+        ) as cursor:
+            all_picks = await cursor.fetchall()
+            
         picked_players = {r["player_id"] for r in all_picks}
 
         insert_picks = []
@@ -881,13 +933,13 @@ async def assign_forfeits(bot: commands.Bot, game: dict, week_id: int) -> None:
                 insert_slots.append((pid, week_id, forfeit_slot, game["id"]))
 
         if insert_picks:
-            conn.executemany(
+            await conn.executemany(
                 """INSERT OR IGNORE INTO picks(player_id, game_id, picked_team,
                    confidence_points, is_forfeit, submitted_at)
                    VALUES (?,?,NULL,?,1,datetime('now'))""",
                 insert_picks
             )
-            conn.executemany(
+            await conn.executemany(
                 """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
                    VALUES (?,?,?,?)
                    ON CONFLICT(player_id, week_id, confidence_points)
@@ -915,7 +967,7 @@ class CurrentPicksView(discord.ui.View):
 
     @discord.ui.button(label="📩 DM me a copy", style=discord.ButtonStyle.primary)
     async def dm_copy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        player = _get_player(str(interaction.user.id))
+        player = await _get_player(str(interaction.user.id))
         if not player or not player["dm_notifications"]:
             await interaction.response.send_message(
                 "You have DMs disabled in the bot settings or server settings.",
@@ -923,13 +975,13 @@ class CurrentPicksView(discord.ui.View):
             )
             return
             
-        season, week = resolve_current_week()
+        season, week = await resolve_current_week()
         if not week:
             await interaction.response.send_message("No active week.", ephemeral=True)
             return
             
-        with get_db() as conn:
-            picks = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 """SELECT pk.picked_team, pk.confidence_points,
                           g.home_team, g.away_team
                    FROM picks pk
@@ -937,7 +989,8 @@ class CurrentPicksView(discord.ui.View):
                    WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0
                    ORDER BY pk.confidence_points DESC""",
                 (self.player_id, week["id"])
-            ).fetchall()
+            ) as cursor:
+                picks = await cursor.fetchall()
 
         if not picks:
             await interaction.response.send_message("You haven't made any picks yet.", ephemeral=True)
@@ -982,7 +1035,7 @@ class PicksHubView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def _get_active_player(self, interaction: discord.Interaction):
-        player = _get_player(str(interaction.user.id))
+        player = await _get_player(str(interaction.user.id))
         if not player:
             await interaction.response.send_message(
                 "You're not registered yet. Use the **Register** button to join!",
@@ -1014,7 +1067,7 @@ class PicksHubView(discord.ui.View):
         if not player:
             return
 
-        season, week = resolve_current_week()
+        season, week = await resolve_current_week()
         if not week:
             await interaction.response.send_message(
                 "No week is currently active. Check back soon!",
@@ -1022,16 +1075,19 @@ class PicksHubView(discord.ui.View):
             )
             return
 
-        with get_db() as conn:
-            games = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
                 (week["id"],)
-            ).fetchall()
+            ) as cursor:
+                games = await cursor.fetchall()
 
         games_list = [dict(g) for g in games]
-        embed = _build_picks_embed(player["id"], dict(week), games_list)
+        picked_ids = await _get_picked_ids(player["id"], week["id"])
+        
+        embed = await _build_picks_embed(player["id"], dict(week), games_list)
         view  = PicksHubEphemeralView(
-            interaction.client, player["id"], dict(week), games_list
+            interaction.client, player["id"], dict(week), games_list, picked_ids
         )
         await interaction.response.send_message(
             embed=embed, view=view, ephemeral=True
@@ -1056,17 +1112,20 @@ class PicksHubView(discord.ui.View):
         player = await self._get_active_player(interaction)
         if not player:
             return
-        season, week = resolve_current_week()
+        season, week = await resolve_current_week()
         if not week:
             from cogs.stats import open_pick_history
             await open_pick_history(interaction)
             return
-        with get_db() as conn:
-            games = conn.execute(
+            
+        async with get_db() as conn:
+            async with conn.execute(
                 "SELECT * FROM games WHERE week_id=? ORDER BY kickoff_time",
                 (week["id"],)
-            ).fetchall()
-        embed = _build_picks_embed(
+            ) as cursor:
+                games = await cursor.fetchall()
+                
+        embed = await _build_picks_embed(
             player["id"], dict(week), [dict(g) for g in games],
             title="Current picks"
         )
@@ -1086,7 +1145,7 @@ class PicksHubView(discord.ui.View):
                        custom_id="picks:register", row=1)
     async def register(self, interaction: discord.Interaction,
                        button: discord.ui.Button) -> None:
-        player = _get_player(str(interaction.user.id))
+        player = await _get_player(str(interaction.user.id))
         if player and player["status"] == "active":
             await interaction.response.send_message(
                 "You're already registered!", ephemeral=True
@@ -1103,7 +1162,7 @@ class PicksHubView(discord.ui.View):
                        custom_id="picks:withdraw", row=1)
     async def withdraw(self, interaction: discord.Interaction,
                        button: discord.ui.Button) -> None:
-        player = _get_player(str(interaction.user.id))
+        player = await _get_player(str(interaction.user.id))
         if not player or player["status"] != "active":
             await interaction.response.send_message(
                 "You're not currently an active player.", ephemeral=True
@@ -1128,8 +1187,8 @@ class WithdrawConfirmView(discord.ui.View):
     @discord.ui.button(label="Yes, withdraw", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction,
                       button: discord.ui.Button) -> None:
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 "UPDATE players SET status='withdrawn', dm_notifications=0 "
                 "WHERE id=?",
                 (self.player_id,)
@@ -1167,16 +1226,17 @@ class PicksCog(commands.Cog):
     @tasks.loop(minutes=1)
     async def lock_checker(self) -> None:
         try:
-            season, week = resolve_current_week()
+            season, week = await resolve_current_week()
             if not week:
                 return
 
-            with get_db() as conn:
-                games = conn.execute(
+            async with get_db() as conn:
+                async with conn.execute(
                     """SELECT * FROM games
                        WHERE week_id=? AND status='scheduled'""",
                     (week["id"],)
-                ).fetchall()
+                ) as cursor:
+                    games = await cursor.fetchall()
 
             from utils.espn import fetch_game_status
             from cogs.admin import update_single_game_embed
@@ -1192,8 +1252,8 @@ class PicksCog(commands.Cog):
                    not game_dict["espn_game_id"].startswith("manual_"):
                     result = await fetch_game_status(game_dict["espn_game_id"])
                     if result:
-                        with get_db() as conn:
-                            conn.execute(
+                        async with get_db() as conn:
+                            await conn.execute(
                                 """UPDATE games SET status=?, home_score=?,
                                    away_score=?, winner=?
                                    WHERE id=?""",
