@@ -1,9 +1,12 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import logging
 import os
-from config import DISCORD_TOKEN, GUILD_ID, SEASON_YEAR, validate_config
-from database import init_db, get_active_season, get_db
+import shutil
+from datetime import datetime
+
+from config import DISCORD_TOKEN, GUILD_ID, SEASON_YEAR, BACKUP_DIR, validate_config
+from database import init_db, get_active_season, get_db, DB_PATH, config_get
 
 os.makedirs("data", exist_ok=True)
 
@@ -33,6 +36,7 @@ class CFCPBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
+        self.backup_loop.start()
 
     async def setup_hook(self):
         init_db()
@@ -49,25 +53,8 @@ class CFCPBot(commands.Bot):
         for cog in cog_files:
             try:
                 await self.load_extension(cog)
-                log.info(f"Loaded cog: {cog}")
             except Exception as exc:
                 log.error(f"Failed to load cog {cog}: {exc}", exc_info=True)
-                
-        # Auto-sync removed to avoid Discord rate limiting.
-        # Run !cfcp sync in Discord to manually update slash commands.
-
-    @commands.command(name="sync")
-    @commands.has_permissions(administrator=True)
-    async def sync_tree(self, ctx: commands.Context):
-        """Manually sync slash commands (Admin only)"""
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
-            self.tree.copy_global_to(guild=guild_obj)
-            await self.tree.sync(guild=guild_obj)
-            await ctx.send(f"✅ Slash commands synced to guild {GUILD_ID}.")
-        else:
-            await self.tree.sync()
-            await ctx.send("✅ Slash commands synced globally.")
 
     def _ensure_season(self):
         season = get_active_season()
@@ -102,6 +89,51 @@ class CFCPBot(commands.Bot):
     async def on_guild_channel_pins_update(self, channel, last_pin):
         pass  
 
+    # ── Phase 4: Automated Backups ───────────────────────────────────────────
+    @tasks.loop(hours=24)
+    async def backup_loop(self):
+        try:
+            # 1. Ensure the folder exists
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+
+            if not os.path.exists(DB_PATH):
+                return
+                
+            # 2. Safely copy the DB
+            date_str = datetime.now().strftime("%Y_%m_%d")
+            backup_filename = f"cfcp_backup_{date_str}.db"
+            backup_path = os.path.join(BACKUP_DIR, backup_filename)
+            
+            shutil.copy2(DB_PATH, backup_path)
+            log.info(f"Database backed up successfully to {backup_path}")
+
+            # 3. Cleanup old backups (Only keep the 7 most recent)
+            backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith(".db")])
+            while len(backups) > 7:
+                oldest = backups.pop(0)
+                os.remove(os.path.join(BACKUP_DIR, oldest))
+                log.info(f"Deleted old backup: {oldest}")
+
+            # 4. Weekly Discord Upload (Runs every Monday)
+            if datetime.now().weekday() == 0: 
+                admin_ch_id = await config_get("channel_admin")
+                if admin_ch_id:
+                    ch = self.get_channel(int(admin_ch_id))
+                    if isinstance(ch, discord.TextChannel):
+                        await ch.send(
+                            content=f"💾 **Weekly Database Backup** ({date_str})\n"
+                                    f"Here is your physical backup snapshot for this week.",
+                            file=discord.File(backup_path, filename=backup_filename)
+                        )
+                        log.info("Weekly physical backup sent to admin channel.")
+
+        except Exception as exc:
+            log.error(f"Backup loop failed: {exc}", exc_info=True)
+
+    @backup_loop.before_loop
+    async def before_backup_loop(self):
+        await self.wait_until_ready()
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -114,7 +146,8 @@ def main():
         return
 
     bot = CFCPBot()
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    bot.run(DISCORD_TOKEN, log_handler=None)  
+
 
 if __name__ == "__main__":
     main()
