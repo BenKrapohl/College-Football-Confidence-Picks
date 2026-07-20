@@ -13,47 +13,46 @@ from utils.time_utils import (format_time_et, parse_iso,
 
 log = logging.getLogger(__name__)
 
-
-# ── Notification senders ─────────────────────────────────────────────────────
-
 async def _notify_missing_picks(bot: commands.Bot, week: dict,
                                 game_day: str, games_on_day: list,
                                 notif_type: str, hours_label: str) -> None:
-    players = get_all_active_players()
+    players = await get_all_active_players()
     game_ids_today = {g["id"] for g in games_on_day}
 
     for player in players:
         if not player["dm_notifications"]:
             continue
 
-        with get_db() as conn:
-            already_sent = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 """SELECT 1 FROM notifications_sent
                    WHERE player_id=? AND week_id=? AND game_day=? AND notif_type=?""",
                 (player["id"], week["id"], game_day, notif_type)
-            ).fetchone()
+            ) as cursor:
+                already_sent = await cursor.fetchone()
+                
             if already_sent:
                 continue
 
-            picked_ids = {
-                r["game_id"] for r in conn.execute(
-                    """SELECT game_id FROM picks
-                       WHERE player_id=? AND is_forfeit=0
-                       AND game_id IN (SELECT id FROM games WHERE week_id=?)""",
-                    (player["id"], week["id"])
-                ).fetchall()
-            }
+            async with conn.execute(
+                """SELECT game_id FROM picks
+                   WHERE player_id=? AND is_forfeit=0
+                   AND game_id IN (SELECT id FROM games WHERE week_id=?)""",
+                (player["id"], week["id"])
+            ) as cursor:
+                rows = await cursor.fetchall()
+                picked_ids = {r["game_id"] for r in rows}
             
-            # Fetch total picks submitted by this player for the week so far
-            week_picks_count = conn.execute(
+            async with conn.execute(
                 "SELECT COUNT(*) as c FROM picks WHERE player_id=? AND week_id=? AND is_forfeit=0",
                 (player["id"], week["id"])
-            ).fetchone()["c"]
+            ) as cursor:
+                week_picks_count = (await cursor.fetchone())["c"]
 
         missing = game_ids_today - picked_ids
         if not missing:
-            with get_db() as conn:
-                conn.execute(
+            async with get_db() as conn:
+                await conn.execute(
                     """INSERT OR IGNORE INTO notifications_sent
                        (player_id, week_id, game_day, notif_type)
                        VALUES (?,?,?,?)""",
@@ -79,8 +78,8 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
 
         sent = await send_dm(bot, player["discord_id"], message)
 
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 """INSERT OR IGNORE INTO notifications_sent
                    (player_id, week_id, game_day, notif_type)
                    VALUES (?,?,?,?)""",
@@ -89,11 +88,12 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
 
         if not sent:
             picks_ch_id = None
-            with get_db() as conn:
-                row = conn.execute(
+            async with get_db() as conn:
+                async with conn.execute(
                     "SELECT value FROM bot_config WHERE key='channel_picks'"
-                ).fetchone()
-                picks_ch_id = row["value"] if row else None
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    picks_ch_id = row["value"] if row else None
             if picks_ch_id:
                 ch = bot.get_channel(int(picks_ch_id))
                 if isinstance(ch, discord.TextChannel):
@@ -106,44 +106,48 @@ async def _notify_missing_picks(bot: commands.Bot, week: dict,
                     )
 
 
-# ── Weekly recap ──────────────────────────────────────────────────────────────
-
 async def send_weekly_recap(bot: commands.Bot, week_id: int) -> None:
-    with get_db() as conn:
-        week = conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)).fetchone()
+    async with get_db() as conn:
+        async with conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)) as cursor:
+            week = await cursor.fetchone()
     if not week:
         return
 
-    players = get_all_active_players()
+    players = await get_all_active_players()
 
     for player in players:
         if not player["dm_notifications"]:
             continue
 
         already = None
-        with get_db() as conn:
-            already = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 """SELECT 1 FROM notifications_sent
                    WHERE player_id=? AND week_id=? AND game_day='recap'
                    AND notif_type='recap'""",
                 (player["id"], week_id)
-            ).fetchone()
+            ) as cursor:
+                already = await cursor.fetchone()
+                
         if already:
             continue
 
-        with get_db() as conn:
-            ws = conn.execute(
+        async with get_db() as conn:
+            async with conn.execute(
                 "SELECT * FROM weekly_scores WHERE player_id=? AND week_id=?",
                 (player["id"], week_id)
-            ).fetchone()
-            picks = conn.execute(
+            ) as cursor:
+                ws = await cursor.fetchone()
+                
+            async with conn.execute(
                 """SELECT pk.*, g.home_team, g.away_team, g.winner, g.home_score,
                           g.away_score
                    FROM picks pk JOIN games g ON pk.game_id = g.id
                    WHERE pk.player_id=? AND g.week_id=?
                    ORDER BY pk.confidence_points DESC""",
                 (player["id"], week_id)
-            ).fetchall()
+            ) as cursor:
+                picks = await cursor.fetchall()
 
         if not ws:
             continue
@@ -181,8 +185,8 @@ async def send_weekly_recap(bot: commands.Bot, week_id: int) -> None:
 
         sent = await send_dm(bot, player["discord_id"], message)
 
-        with get_db() as conn:
-            conn.execute(
+        async with get_db() as conn:
+            await conn.execute(
                 """INSERT OR IGNORE INTO notifications_sent
                    (player_id, week_id, game_day, notif_type)
                    VALUES (?,?,'recap','recap')""",
@@ -198,8 +202,6 @@ async def send_weekly_recap(bot: commands.Bot, week_id: int) -> None:
             )
 
 
-# ── Cog ────────────────────────────────────────────────────────────────────────
-
 class NotificationsCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -211,16 +213,17 @@ class NotificationsCog(commands.Cog):
     @tasks.loop(seconds=NOTIF_CHECK_INTERVAL)
     async def notification_checker(self) -> None:
         try:
-            season, week = resolve_current_week()
+            season, week = await resolve_current_week()
             if not week:
                 return
 
-            with get_db() as conn:
-                games = conn.execute(
+            async with get_db() as conn:
+                async with conn.execute(
                     """SELECT * FROM games
                        WHERE week_id=? AND status='scheduled'""",
                     (week["id"],)
-                ).fetchall()
+                ) as cursor:
+                    games = await cursor.fetchall()
 
             if not games:
                 return
