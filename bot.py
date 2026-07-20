@@ -28,7 +28,6 @@ intents.guild_messages = True
 intents.members        = True
 intents.message_content = True
 
-
 class CFCPBot(commands.Bot):
     def __init__(self):
         super().__init__(
@@ -36,11 +35,13 @@ class CFCPBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
-        self.backup_loop.start()
 
     async def setup_hook(self):
-        init_db()
-        self._ensure_season()
+        await init_db()
+        await self._ensure_season()
+
+        if not self.backup_loop.is_running():
+            self.backup_loop.start()
 
         cog_files = [
             "cogs.admin",
@@ -56,11 +57,11 @@ class CFCPBot(commands.Bot):
             except Exception as exc:
                 log.error(f"Failed to load cog {cog}: {exc}", exc_info=True)
 
-    def _ensure_season(self):
-        season = get_active_season()
+    async def _ensure_season(self):
+        season = await get_active_season()
         if not season:
-            with get_db() as conn:
-                conn.execute(
+            async with get_db() as conn:
+                await conn.execute(
                     "INSERT OR IGNORE INTO seasons(year, poll_type, is_active) VALUES (?,?,1)",
                     (SEASON_YEAR, "ap"),
                 )
@@ -89,17 +90,14 @@ class CFCPBot(commands.Bot):
     async def on_guild_channel_pins_update(self, channel, last_pin):
         pass  
 
-    # ── Phase 4: Automated Backups ───────────────────────────────────────────
+    # ── Automated Backups ───────────────────────────────────────────
     @tasks.loop(hours=24)
     async def backup_loop(self):
         try:
-            # 1. Ensure the folder exists
             os.makedirs(BACKUP_DIR, exist_ok=True)
-
             if not os.path.exists(DB_PATH):
                 return
                 
-            # 2. Safely copy the DB
             date_str = datetime.now().strftime("%Y_%m_%d")
             backup_filename = f"cfcp_backup_{date_str}.db"
             backup_path = os.path.join(BACKUP_DIR, backup_filename)
@@ -107,14 +105,12 @@ class CFCPBot(commands.Bot):
             shutil.copy2(DB_PATH, backup_path)
             log.info(f"Database backed up successfully to {backup_path}")
 
-            # 3. Cleanup old backups (Only keep the 7 most recent)
             backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith(".db")])
             while len(backups) > 7:
                 oldest = backups.pop(0)
                 os.remove(os.path.join(BACKUP_DIR, oldest))
                 log.info(f"Deleted old backup: {oldest}")
 
-            # 4. Weekly Discord Upload (Runs every Monday)
             if datetime.now().weekday() == 0: 
                 admin_ch_id = await config_get("channel_admin")
                 if admin_ch_id:
@@ -126,16 +122,12 @@ class CFCPBot(commands.Bot):
                             file=discord.File(backup_path, filename=backup_filename)
                         )
                         log.info("Weekly physical backup sent to admin channel.")
-
         except Exception as exc:
             log.error(f"Backup loop failed: {exc}", exc_info=True)
 
     @backup_loop.before_loop
     async def before_backup_loop(self):
         await self.wait_until_ready()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     errors = validate_config()
@@ -147,7 +139,6 @@ def main():
 
     bot = CFCPBot()
     bot.run(DISCORD_TOKEN, log_handler=None)  
-
 
 if __name__ == "__main__":
     main()
