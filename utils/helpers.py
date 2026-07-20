@@ -11,7 +11,7 @@ from discord.ext import commands
 import logging
 
 from config import ADMIN_ROLE_ID
-from database import config_get, get_active_season, get_latest_week
+from database import config_get, get_active_season, get_latest_week, get_current_week
 from utils.embeds import log_embed
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ async def log_to_channel(
     level: str = "info",
 ) -> None:
     """Send a formatted log embed to #cfcp-logs."""
-    ch_id = config_get("channel_logs")
+    ch_id = await config_get("channel_logs")
     if not ch_id:
         return
     ch = bot.get_channel(int(ch_id))
@@ -48,29 +48,28 @@ async def log_to_channel(
 
 # ── Current week resolution ───────────────────────────────────────────────────
 
-def resolve_current_week():
+async def resolve_current_week():
     """
     FIX #7: Returns (season, week) using date-range matching so the bot
     stays on the correct week even when a future week is loaded early.
     Falls back to the latest loaded week if no date-range match.
     """
-    from database import get_current_week
-    season = get_active_season()
+    season = await get_active_season()
     if not season:
         return None, None
-    week = get_current_week(season["id"])
+    week = await get_current_week(season["id"])
     return season, week
 
 
-def resolve_latest_week():
+async def resolve_latest_week():
     """
     Returns (season, week) using the most recently inserted week.
     Used by admin operations that always want to act on the last-loaded week.
     """
-    season = get_active_season()
+    season = await get_active_season()
     if not season:
         return None, None
-    week = get_latest_week(season["id"])
+    week = await get_latest_week(season["id"])
     return season, week
 
 
