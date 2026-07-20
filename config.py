@@ -16,7 +16,6 @@ CHANNEL_GAMES       = "cfcp-games"
 CHANNEL_STANDINGS   = "cfcp-standings"
 
 # ── Backups ───────────────────────────────────────────────────────────────────
-# Where the bot will locally store database copies
 BACKUP_DIR          = os.path.join(os.path.dirname(__file__), "backups")
 
 # ── ESPN API ──────────────────────────────────────────────────────────────────
@@ -41,9 +40,13 @@ SEASON_YEAR         = 2026
 # ── Refresh intervals (seconds) ──────────────────────────────────────────────
 REFRESH_INTERVAL = 900      # scheduler tick every 15 min
 
+# ── Notifications ─────────────────────────────────────────────────────────────
+NOTIF_24HR           = 86400    # 24 hours in seconds
+NOTIF_30MIN          = 1800     # 30 minutes in seconds
+NOTIF_CHECK_INTERVAL = 300      # Background loop check (5 minutes)
+
 # ── Bot behavior ──────────────────────────────────────────────────────────────
 PICKS_REVEAL_DEFAULT    = True   # show who picked what after lock
-# FIX #26: Single source of truth — was duplicated in scoring.py
 ESPN_FINAL_GRACE_SECS   = 180    # wait 3 min after 'post' before scoring
 STALE_WEEK_HOURS        = 48     # log warning if week not loaded
 
@@ -60,13 +63,8 @@ COLOR_BLUE          = 0x185FA5
 # ── Timezone ──────────────────────────────────────────────────────────────────
 TIMEZONE            = "America/New_York"
 
-
-# ── FIX #17: Startup validation ───────────────────────────────────────────────
+# ── Startup validation ───────────────────────────────────────────────
 def validate_config() -> list[str]:
-    """
-    Returns a list of error strings. Empty list = config is valid.
-    Call this before starting the bot so misconfigurations fail fast.
-    """
     errors = []
     if not DISCORD_TOKEN:
         errors.append("DISCORD_TOKEN is not set in .env")
