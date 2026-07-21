@@ -354,18 +354,22 @@ async def get_season_leaderboard(season_id: int):
                 pl.id,
                 pl.display_name,
                 pl.status,
-                COALESCE(SUM(ws.points_earned), 0)    AS total_points,
-                COALESCE(SUM(ws.correct_picks), 0)    AS total_correct,
-                COALESCE(SUM(ws.wrong_picks), 0)      AS total_wrong,
-                COALESCE(SUM(ws.forfeited_picks), 0)  AS total_forfeits,
-                COALESCE(SUM(ws.total_possible), 0)   AS total_possible,
-                COUNT(ws.week_id)                     AS weeks_played,
-                COALESCE(MAX(ws.points_earned), 0)    AS best_week,
-                COALESCE(MIN(CASE WHEN ws.total_possible > 0
-                             THEN ws.points_earned END), 0) AS worst_week
+                COALESCE(SUM(sws.points_earned), 0)    AS total_points,
+                COALESCE(SUM(sws.correct_picks), 0)    AS total_correct,
+                COALESCE(SUM(sws.wrong_picks), 0)      AS total_wrong,
+                COALESCE(SUM(sws.forfeited_picks), 0)  AS total_forfeits,
+                COALESCE(SUM(sws.total_possible), 0)   AS total_possible,
+                COUNT(sws.week_id)                     AS weeks_played,
+                COALESCE(MAX(sws.points_earned), 0)    AS best_week,
+                COALESCE(MIN(CASE WHEN sws.total_possible > 0
+                             THEN sws.points_earned END), 0) AS worst_week
             FROM players pl
-            LEFT JOIN weekly_scores ws ON ws.player_id = pl.id
-            LEFT JOIN weeks w ON ws.week_id = w.id AND w.season_id = ?
+            -- Fix C1: Join against a strictly filtered subquery for the current season
+            LEFT JOIN (
+                SELECT ws.* FROM weekly_scores ws
+                JOIN weeks w ON ws.week_id = w.id
+                WHERE w.season_id = ?
+            ) sws ON sws.player_id = pl.id
             WHERE pl.status IN ('active', 'withdrawn')
             GROUP BY pl.id
             ORDER BY total_points DESC, total_correct DESC
