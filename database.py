@@ -2,11 +2,16 @@ import aiosqlite
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cfcp.db")
 
+def _today_et_str() -> str:
+    """Helper to return the current calendar day strictly in Eastern Time."""
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
 
 @asynccontextmanager
 async def get_db():
@@ -14,7 +19,6 @@ async def get_db():
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
-    # FIX #6: Use UTC for all timestamps — avoids server-timezone drift
     await conn.execute("PRAGMA timezone='utc'")
     try:
         yield conn
@@ -168,8 +172,6 @@ async def init_db():
             );
 
             -- ── FIX #11: Grace period persistence ────────────────────
-            -- Tracks games in the ESPN final grace window so bot restarts
-            -- don't lose scoring state.
             CREATE TABLE IF NOT EXISTS scoring_grace (
                 game_id             INTEGER PRIMARY KEY REFERENCES games(id),
                 grace_started_at    TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -218,14 +220,12 @@ async def get_active_season():
             return await cursor.fetchone()
 
 async def end_active_season():
-    """Mark the current season as ended. Used by the End Season admin flow."""
     async with get_db() as conn:
         await conn.execute(
             "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
         )
 
 async def create_season(year: int, poll_type: str = "ap"):
-    """Deactivate any running season and create a new one."""
     async with get_db() as conn:
         await conn.execute(
             "UPDATE seasons SET is_active=0, ended_at=datetime('now') WHERE is_active=1"
@@ -238,18 +238,18 @@ async def create_season(year: int, poll_type: str = "ap"):
 async def get_current_week(season_id: int):
     """
     Returns the week whose start_date <= today <= end_date.
-    Falls back to the most recently loaded week if no date-range match
-    (handles the case where an admin loads next week early).
+    Uses strict ET dates to prevent UTC Monday night boundary cutoffs.
     """
+    today_str = _today_et_str()
     async with get_db() as conn:
-        # Try date-range match first
+        # Try ET date-range match first
         async with conn.execute("""
             SELECT * FROM weeks
             WHERE season_id = ?
-              AND start_date <= date('now')
-              AND end_date   >= date('now')
+              AND start_date <= ?
+              AND end_date   >= ?
             LIMIT 1
-        """, (season_id,)) as cursor:
+        """, (season_id, today_str, today_str)) as cursor:
             matched = await cursor.fetchone()
             
         if matched:
@@ -395,7 +395,6 @@ async def get_week_leaderboard(week_id: int):
 # ── GRACE PERIOD HELPERS (FIX #11) ───────────────────────────────────────────
 
 async def grace_start(game_id: int):
-    """Record that a game entered the scoring grace period."""
     async with get_db() as conn:
         await conn.execute(
             "INSERT OR IGNORE INTO scoring_grace(game_id) VALUES (?)",
@@ -403,9 +402,6 @@ async def grace_start(game_id: int):
         )
 
 async def grace_elapsed_secs(game_id: int) -> float | None:
-    """
-    Returns seconds since grace started, or None if not in grace period.
-    """
     async with get_db() as conn:
         async with conn.execute(
             "SELECT grace_started_at FROM scoring_grace WHERE game_id=?",
@@ -423,7 +419,6 @@ async def grace_elapsed_secs(game_id: int) -> float | None:
     return (datetime.now(tz=timezone.utc) - started).total_seconds()
 
 async def grace_clear(game_id: int):
-    """Remove a game from the grace period table after scoring."""
     async with get_db() as conn:
         await conn.execute(
             "DELETE FROM scoring_grace WHERE game_id=?", (game_id,)
