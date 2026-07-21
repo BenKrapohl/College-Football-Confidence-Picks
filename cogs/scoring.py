@@ -57,8 +57,9 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
 
     async with get_db() as conn:
         for player in players:
+            # FIX C2: Added pk.picked_team to the SELECT so we can verify the winner dynamically
             async with conn.execute(
-                """SELECT pk.confidence_points, pk.is_correct, pk.is_forfeit,
+                """SELECT pk.confidence_points, pk.is_correct, pk.is_forfeit, pk.picked_team,
                           g.status as g_status, g.winner as g_winner
                    FROM picks pk
                    JOIN games g ON pk.game_id = g.id
@@ -80,6 +81,7 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
                     forfeited_picks += 1
                     if r["g_status"] == "final":
                         total_possible += pts
+                        wrong_picks += 1
                     continue
 
                 if r["g_status"] != "final":
@@ -90,25 +92,37 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
                 if r["g_winner"] is None:
                     continue
 
-                if r["is_correct"] == 1:
+                # FIX C2: Derive correctness dynamically from the actual data!
+                # Do NOT rely on the is_correct cache, as manual fixes leave it NULL.
+                if r["picked_team"] == r["g_winner"]:
                     points_earned += pts
                     correct_picks += 1
                 else:
                     wrong_picks += 1
 
-            await conn.execute("""
-                INSERT INTO weekly_scores(player_id, week_id, points_earned,
-                    correct_picks, wrong_picks, forfeited_picks, total_possible)
-                VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT(player_id, week_id) DO UPDATE SET
-                    points_earned   = excluded.points_earned,
-                    correct_picks   = excluded.correct_picks,
-                    wrong_picks     = excluded.wrong_picks,
-                    forfeited_picks = excluded.forfeited_picks,
-                    total_possible  = excluded.total_possible
-            """, (player["id"], week_id, points_earned, correct_picks,
-                  wrong_picks, forfeited_picks, total_possible))
+            # FIX M2: Only save a score row if there was actually scoring potential.
+            # This prevents 0/0 non-participants from inflating weeks_played and ranks.
+            if total_possible > 0:
+                await conn.execute("""
+                    INSERT INTO weekly_scores(player_id, week_id, points_earned,
+                        correct_picks, wrong_picks, forfeited_picks, total_possible)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(player_id, week_id) DO UPDATE SET
+                        points_earned   = excluded.points_earned,
+                        correct_picks   = excluded.correct_picks,
+                        wrong_picks     = excluded.wrong_picks,
+                        forfeited_picks = excluded.forfeited_picks,
+                        total_possible  = excluded.total_possible
+                """, (player["id"], week_id, points_earned, correct_picks,
+                      wrong_picks, forfeited_picks, total_possible))
+            else:
+                # Clean up empty rows if they were accidentally created previously
+                await conn.execute(
+                    "DELETE FROM weekly_scores WHERE player_id=? AND week_id=?", 
+                    (player["id"], week_id)
+                )
 
+        # Rerank the week, strictly for users who actually have a row
         async with conn.execute("""
             SELECT id, player_id, points_earned, correct_picks
             FROM weekly_scores WHERE week_id=?
@@ -129,32 +143,6 @@ async def recalculate_weekly_scores(bot: commands.Bot, week_id: int) -> None:
             )
 
     await _refresh_standings(bot, week_id)
-
-
-# ── Standings refresh ────────────────────────────────────────────────────────
-
-async def _refresh_standings(bot: commands.Bot, week_id: int) -> None:
-    from cogs.setup import refresh_standings
-    from database import get_active_season, get_season_leaderboard
-
-    async with get_db() as conn:
-        async with conn.execute("SELECT * FROM weeks WHERE id=?", (week_id,)) as cursor:
-            week = await cursor.fetchone()
-            
-    if not week:
-        return
-
-    season = await get_active_season()
-    if not season:
-        return
-
-    week_rows   = await get_week_leaderboard(week_id)
-    season_rows = await get_season_leaderboard(season["id"])
-
-    week_embed   = standings_week_embed(week_rows, week["week_number"])
-    season_embed = standings_season_embed(season_rows, season["year"])
-
-    await refresh_standings(bot, week_embed, season_embed)
 
 
 # ── Game-day scoring poll ────────────────────────────────────────────────────
