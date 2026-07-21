@@ -269,6 +269,7 @@ class LoadWeekModal(discord.ui.Modal, title="Load a week"):
                 ) as cursor:
                     week_id = cursor.lastrowid
 
+            # ── FIX: STALE GAME DELETION PENALTY PATCH ──
             new_espn_ids = {g["espn_game_id"] for g in games}
             async with conn.execute(
                 """SELECT id, espn_game_id, home_team, away_team, status
@@ -278,14 +279,53 @@ class LoadWeekModal(discord.ui.Modal, title="Load a week"):
                 (week_id,)
             ) as cursor:
                 stale_games = await cursor.fetchall()
-                
+            
+            async with conn.execute("SELECT game_count FROM weeks WHERE id=?", (week_id,)) as cursor:
+                old_gc_row = await cursor.fetchone()
+                old_game_count = old_gc_row["game_count"] if old_gc_row else len(games)
+
             removed_stale = []
             for sg in stale_games:
                 if sg["espn_game_id"] not in new_espn_ids:
-                    await conn.execute("DELETE FROM pick_slots WHERE game_id=?", (sg["id"],))
-                    await conn.execute("DELETE FROM picks WHERE game_id=?", (sg["id"],))
-                    await conn.execute("DELETE FROM games WHERE id=?", (sg["id"],))
+                    game_id = sg["id"]
+                    
+                    async with conn.execute(
+                        "SELECT player_id, confidence_points, game_id FROM picks WHERE game_id IN (SELECT id FROM games WHERE week_id=?)",
+                        (week_id,)
+                    ) as cursor:
+                        all_picks = await cursor.fetchall()
+                        
+                    player_picks = {}
+                    for p in all_picks:
+                        player_picks.setdefault(p["player_id"], []).append(dict(p))
+                        
+                    await conn.execute("DELETE FROM pick_slots WHERE game_id=?", (game_id,))
+                    await conn.execute("DELETE FROM picks WHERE game_id=?", (game_id,))
+                    await conn.execute("DELETE FROM games WHERE id=?", (game_id,))
+                    
+                    for pid, p_picks in player_picks.items():
+                        voided_pick = next((p for p in p_picks if p["game_id"] == game_id), None)
+                        used_slots = {p["confidence_points"] for p in p_picks}
+                        
+                        if voided_pick:
+                            x = voided_pick["confidence_points"]
+                        else:
+                            empty_slots = [s for s in range(1, old_game_count + 1) if s not in used_slots]
+                            x = max(empty_slots) if empty_slots else old_game_count
+                            
+                        picks_to_shift = [p for p in p_picks if p["game_id"] != game_id and p["confidence_points"] > x]
+                        picks_to_shift.sort(key=lambda p: p["confidence_points"]) 
+                        
+                        for p in picks_to_shift:
+                            old_pts = p["confidence_points"]
+                            new_pts = old_pts - 1
+                            await conn.execute("UPDATE picks SET confidence_points=? WHERE player_id=? AND game_id=?", (new_pts, pid, p["game_id"]))
+                            await conn.execute("DELETE FROM pick_slots WHERE player_id=? AND week_id=? AND confidence_points=?", (pid, week_id, old_pts))
+                            await conn.execute("INSERT INTO pick_slots (player_id, week_id, confidence_points, game_id) VALUES (?, ?, ?, ?)", (pid, week_id, new_pts, p["game_id"]))
+
+                    old_game_count -= 1
                     removed_stale.append(f"{sg['home_team']} vs {sg['away_team']}")
+            # ─────────────────────────────────────────────
 
             for g in games:
                 await conn.execute("""
@@ -348,7 +388,7 @@ class LoadWeekModal(discord.ui.Modal, title="Load a week"):
             interaction.client,
             f"**Week {wk_num}** loaded by {interaction.user.mention} — "
             f"{len(games)} games" +
-            (f", {len(removed_stale)} stale game(s) removed" if removed_stale else ""),
+            (f", {len(removed_stale)} stale game(s) removed (grids mathematically shifted)" if removed_stale else ""),
             title="Week loaded",
             level="success",
         )
