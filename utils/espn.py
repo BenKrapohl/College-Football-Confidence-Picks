@@ -106,10 +106,15 @@ async def fetch_week_games(
                     over_under = str(o["overUnder"])
 
         status_name = event["status"]["type"]["name"]
+        
+        # FIX C6: Explicitly map CANCELED and POSTPONED states.
+        # This prevents disrupted games from defaulting to 'scheduled' and stalling the week.
         status_map  = {
             "STATUS_SCHEDULED":   "scheduled",
             "STATUS_IN_PROGRESS": "in_progress",
             "STATUS_FINAL":       "final",
+            "STATUS_CANCELED":    "canceled",
+            "STATUS_POSTPONED":   "postponed",
         }
         status = status_map.get(status_name, "scheduled")
 
@@ -175,10 +180,13 @@ async def fetch_game_status(espn_game_id: str) -> dict | None:
         status_name   = status_type.get("name", "STATUS_SCHEDULED")
         status_detail = status_type.get("shortDetail", "")
 
+        # FIX C6: Explicitly map CANCELED and POSTPONED states here as well.
         status_map = {
             "STATUS_SCHEDULED":   "scheduled",
             "STATUS_IN_PROGRESS": "in_progress",
             "STATUS_FINAL":       "final",
+            "STATUS_CANCELED":    "canceled",
+            "STATUS_POSTPONED":   "postponed",
         }
         status = status_map.get(status_name, "scheduled")
 
