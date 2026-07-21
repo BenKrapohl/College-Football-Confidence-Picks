@@ -8,12 +8,20 @@ from config import ESPN_SCOREBOARD_URL, ESPN_RANKINGS_URL, POLL_AP
 log = logging.getLogger(__name__)
 ET  = ZoneInfo("America/New_York")
 
+_session: Optional[aiohttp.ClientSession] = None
+
+async def get_session() -> aiohttp.ClientSession:
+    """Maintain a single global ClientSession to prevent socket exhaustion."""
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
 
 async def _get(url: str, params: Optional[dict] = None) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=10) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+    session = await get_session()
+    async with session.get(url, params=params, timeout=10) as resp:
+        resp.raise_for_status()
+        return await resp.json()
 
 
 # ── RANKINGS ──────────────────────────────────────────────────────────────────
