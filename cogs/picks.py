@@ -6,6 +6,8 @@ from discord.ext import tasks
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import asyncio
+from collections import defaultdict
 
 from config import COLOR_PURPLE, COLOR_GREEN
 from database import (get_db, config_get, get_all_active_players,
@@ -15,6 +17,10 @@ from utils.time_utils import format_time_et, seconds_until_iso
 
 log = logging.getLogger(__name__)
 ET  = ZoneInfo("America/New_York")
+
+# FIX C3 & H3: Create an asynchronous lock mapping for each user.
+# This strictly serializes incoming pick requests per user to prevent double-click race conditions.
+_player_locks = defaultdict(asyncio.Lock)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -92,19 +98,25 @@ async def _refresh_picks_hub(bot: commands.Bot) -> None:
     player_list = []
     
     async with get_db() as conn:
-        for p in players:
-            async with conn.execute(
-                """SELECT COUNT(*) as c FROM picks pk
-                   JOIN games g ON pk.game_id = g.id
-                   WHERE pk.player_id=? AND g.week_id=? AND pk.is_forfeit=0""",
-                (p["id"], week["id"])
-            ) as cursor:
-                row = await cursor.fetchone()
-                count = row["c"]
-                player_list.append({
-                    **dict(p),
-                    "submitted": count >= week["game_count"]
-                })
+        # FIX H1: Replaced the intensive N+1 "for player in players" loop.
+        # This single GROUP BY aggregate scales perfectly to thousands of users.
+        async with conn.execute(
+            """SELECT pk.player_id, COUNT(*) as c 
+               FROM picks pk
+               JOIN games g ON pk.game_id = g.id
+               WHERE g.week_id=? AND pk.is_forfeit=0
+               GROUP BY pk.player_id""",
+            (week["id"],)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            pick_counts = {r["player_id"]: r["c"] for r in rows}
+            
+    for p in players:
+        count = pick_counts.get(p["id"], 0)
+        player_list.append({
+            **dict(p),
+            "submitted": count >= week["game_count"]
+        })
                 
     await refresh_picks_hub(
         bot,
@@ -801,90 +813,94 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                      game: dict, picked_team: str, slot: int,
                      override: bool = False) -> None:
     
-    async with get_db() as conn:
-        async with conn.execute(
-            "SELECT status, kickoff_time FROM games WHERE id=?", 
-            (game["id"],)
-        ) as cursor:
-            live_game = await cursor.fetchone()
-
-    if not live_game or _game_is_locked(dict(live_game)):
-        await interaction.response.send_message(
-            "🛑 This game has already kicked off. Your pick has been rejected and the game is locked.", 
-            ephemeral=True
-        )
-        return
-
-    async with get_db() as conn:
-        if override:
+    # FIX C3 & H3: Wrap the entire function logic in a per-player async lock.
+    # This completely serializes rapid double-clicks and ensures atomic database transactions.
+    async with _player_locks[player_id]:
+        
+        # Merge the validation read block and write block into a single database context 
+        # to prevent TOCTOU (Time-of-check to time-of-use) race conditions.
+        async with get_db() as conn:
             async with conn.execute(
-                """SELECT ps.game_id FROM pick_slots ps
-                   WHERE ps.player_id=? AND ps.week_id=? AND ps.confidence_points=?""",
-                (player_id, week["id"], slot)
+                "SELECT status, kickoff_time FROM games WHERE id=?", 
+                (game["id"],)
             ) as cursor:
-                displaced = await cursor.fetchone()
-                
-            if displaced:
-                # ── FIX: TIME MACHINE EXPLOIT PATCH ──
-                async with conn.execute(
-                    "SELECT status, kickoff_time FROM games WHERE id=?", 
-                    (displaced["game_id"],)
-                ) as cursor2:
-                    disp_game = await cursor2.fetchone()
-                
-                if disp_game and _game_is_locked(dict(disp_game)):
-                    await interaction.response.send_message(
-                        "🛑 The pick occupying this slot is for a game that has already started or ended. You cannot override locked picks.", 
-                        ephemeral=True
-                    )
-                    return
-                # ───────────────────────────────────────
+                live_game = await cursor.fetchone()
 
+            if not live_game or _game_is_locked(dict(live_game)):
+                await interaction.response.send_message(
+                    "🛑 This game has already kicked off. Your pick has been rejected and the game is locked.", 
+                    ephemeral=True
+                )
+                return
+
+            if override:
+                async with conn.execute(
+                    """SELECT ps.game_id FROM pick_slots ps
+                       WHERE ps.player_id=? AND ps.week_id=? AND ps.confidence_points=?""",
+                    (player_id, week["id"], slot)
+                ) as cursor:
+                    displaced = await cursor.fetchone()
+                    
+                if displaced:
+                    async with conn.execute(
+                        "SELECT status, kickoff_time FROM games WHERE id=?", 
+                        (displaced["game_id"],)
+                    ) as cursor2:
+                        disp_game = await cursor2.fetchone()
+                    
+                    if disp_game and _game_is_locked(dict(disp_game)):
+                        await interaction.response.send_message(
+                            "🛑 The pick occupying this slot is for a game that has already started or ended. You cannot override locked picks.", 
+                            ephemeral=True
+                        )
+                        return
+
+                    await conn.execute(
+                        "DELETE FROM picks WHERE player_id=? AND game_id=?",
+                        (player_id, displaced["game_id"])
+                    )
+                    await conn.execute(
+                        "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
+                        "AND confidence_points=?",
+                        (player_id, week["id"], slot)
+                    )
+
+            async with conn.execute(
+                "SELECT id, confidence_points FROM picks WHERE player_id=? AND game_id=?",
+                (player_id, game["id"])
+            ) as cursor:
+                existing_same_game = await cursor.fetchone()
+
+            if existing_same_game:
+                old_slot = existing_same_game["confidence_points"]
                 await conn.execute(
-                    "DELETE FROM picks WHERE player_id=? AND game_id=?",
-                    (player_id, displaced["game_id"])
+                    "UPDATE picks SET picked_team=?, confidence_points=?, "
+                    "submitted_at=datetime('now') "
+                    "WHERE player_id=? AND game_id=?",
+                    (picked_team, slot, player_id, game["id"])
                 )
                 await conn.execute(
                     "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
                     "AND confidence_points=?",
-                    (player_id, week["id"], slot)
+                    (player_id, week["id"], old_slot)
+                )
+            else:
+                await conn.execute(
+                    """INSERT INTO picks(player_id, game_id, picked_team,
+                       confidence_points, submitted_at)
+                       VALUES (?,?,?,?,datetime('now'))""",
+                    (player_id, game["id"], picked_team, slot)
                 )
 
-        async with conn.execute(
-            "SELECT id, confidence_points FROM picks WHERE player_id=? AND game_id=?",
-            (player_id, game["id"])
-        ) as cursor:
-            existing_same_game = await cursor.fetchone()
-
-        if existing_same_game:
-            old_slot = existing_same_game["confidence_points"]
             await conn.execute(
-                "UPDATE picks SET picked_team=?, confidence_points=?, "
-                "submitted_at=datetime('now') "
-                "WHERE player_id=? AND game_id=?",
-                (picked_team, slot, player_id, game["id"])
-            )
-            await conn.execute(
-                "DELETE FROM pick_slots WHERE player_id=? AND week_id=? "
-                "AND confidence_points=?",
-                (player_id, week["id"], old_slot)
-            )
-        else:
-            await conn.execute(
-                """INSERT INTO picks(player_id, game_id, picked_team,
-                   confidence_points, submitted_at)
-                   VALUES (?,?,?,?,datetime('now'))""",
-                (player_id, game["id"], picked_team, slot)
+                """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(player_id, week_id, confidence_points)
+                   DO UPDATE SET game_id=excluded.game_id""",
+                (player_id, week["id"], slot, game["id"])
             )
 
-        await conn.execute(
-            """INSERT INTO pick_slots(player_id, week_id, confidence_points, game_id)
-               VALUES (?,?,?,?)
-               ON CONFLICT(player_id, week_id, confidence_points)
-               DO UPDATE SET game_id=excluded.game_id""",
-            (player_id, week["id"], slot, game["id"])
-        )
-
+    # UI updates deliberately executed *outside* the lock so we don't stall the DB
     picked_ids = await _get_picked_ids(player_id, week["id"])
     hub_view = PicksHubEphemeralView(bot, player_id, week, games, picked_ids)
     embed    = await _build_picks_embed(player_id, week, games)
@@ -1241,9 +1257,11 @@ class PicksCog(commands.Cog):
                 return
 
             async with get_db() as conn:
+                # FIX C5: Fetch ANY game that is not 'final'. 
+                # This ensures we don't accidentally skip in-progress games for forfeits.
                 async with conn.execute(
                     """SELECT * FROM games
-                       WHERE week_id=? AND status='scheduled'""",
+                       WHERE week_id=? AND status != 'final'""",
                     (week["id"],)
                 ) as cursor:
                     games = await cursor.fetchall()
@@ -1255,11 +1273,18 @@ class PicksCog(commands.Cog):
                 game_dict = dict(game)
                 secs = seconds_until_iso(game_dict["kickoff_time"])
 
-                if secs <= 0 and secs > -300:
+                if secs <= 0:
+                    # FIX C5: Removed the narrow 5-minute window (secs > -300).
+                    # Forfeits will now safely back-fill for ANY locked game, even after downtime.
+                    # Because assign_forfeits is idempotent, this is completely safe.
                     await assign_forfeits(self.bot, game_dict, week["id"])
 
-                if secs <= 0 and game_dict.get("espn_game_id") and \
+                # Only fetch ESPN status if the game is still 'scheduled'. 
+                # (The Score Poller takes over once a game becomes 'in_progress')
+                if game_dict["status"] == "scheduled" and secs <= 0 and \
+                   game_dict.get("espn_game_id") and \
                    not game_dict["espn_game_id"].startswith("manual_"):
+                   
                     result = await fetch_game_status(game_dict["espn_game_id"])
                     if result:
                         async with get_db() as conn:
