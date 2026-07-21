@@ -801,10 +801,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                      game: dict, picked_team: str, slot: int,
                      override: bool = False) -> None:
     
-    # FIX #2: Absolute Backend Timestamp Verification
-    # Instead of relying on the cached game dictionary passed from the UI,
-    # we explicitly query the database for the exact status and kickoff time 
-    # at the exact millisecond the user clicks submit.
     async with get_db() as conn:
         async with conn.execute(
             "SELECT status, kickoff_time FROM games WHERE id=?", 
@@ -812,7 +808,6 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
         ) as cursor:
             live_game = await cursor.fetchone()
 
-    # Reject the payload if the game doesn't exist or if it has kicked off.
     if not live_game or _game_is_locked(dict(live_game)):
         await interaction.response.send_message(
             "🛑 This game has already kicked off. Your pick has been rejected and the game is locked.", 
@@ -830,6 +825,21 @@ async def _save_pick(interaction: discord.Interaction, bot: commands.Bot,
                 displaced = await cursor.fetchone()
                 
             if displaced:
+                # ── FIX: TIME MACHINE EXPLOIT PATCH ──
+                async with conn.execute(
+                    "SELECT status, kickoff_time FROM games WHERE id=?", 
+                    (displaced["game_id"],)
+                ) as cursor2:
+                    disp_game = await cursor2.fetchone()
+                
+                if disp_game and _game_is_locked(dict(disp_game)):
+                    await interaction.response.send_message(
+                        "🛑 The pick occupying this slot is for a game that has already started or ended. You cannot override locked picks.", 
+                        ephemeral=True
+                    )
+                    return
+                # ───────────────────────────────────────
+
                 await conn.execute(
                     "DELETE FROM picks WHERE player_id=? AND game_id=?",
                     (player_id, displaced["game_id"])
