@@ -269,7 +269,7 @@ class LoadWeekModal(discord.ui.Modal, title="Load a week"):
                 ) as cursor:
                     week_id = cursor.lastrowid
 
-            # ── FIX: STALE GAME DELETION PENALTY PATCH ──
+            # ── STALE GAME DELETION PENALTY PATCH ──
             new_espn_ids = {g["espn_game_id"] for g in games}
             async with conn.execute(
                 """SELECT id, espn_game_id, home_team, away_team, status
@@ -371,6 +371,11 @@ class LoadWeekModal(discord.ui.Modal, title="Load a week"):
 
         from cogs.picks import _refresh_picks_hub
         await _refresh_picks_hub(interaction.client)
+
+        # FIX C4: Recalculate scores if stale games were purged
+        if removed_stale:
+            from cogs.scoring import recalculate_weekly_scores
+            await recalculate_weekly_scores(interaction.client, week_id)
 
         result_msg = (
             f"✅ **Week {wk_num}** loaded with **{len(games)}** ranked games "
@@ -631,6 +636,10 @@ class VoidGameSelectView(discord.ui.View):
         await refresh_admin_panel(interaction.client)
         from cogs.picks import _refresh_picks_hub
         await _refresh_picks_hub(interaction.client)
+
+        # FIX C4: Always recalculate scores after a void to adjust total_possible
+        from cogs.scoring import recalculate_weekly_scores
+        await recalculate_weekly_scores(self.bot, self.week["id"])
 
         warn = (
             f"\n\n♻️ **{has_picks}** player(s) had points on this game. Their lower-confidence picks "
